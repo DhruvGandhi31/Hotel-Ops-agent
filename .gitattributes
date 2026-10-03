@@ -1,0 +1,4 @@
+# Shell scripts and SQL run inside Linux containers; CRLF breaks them.
+* text=auto eol=lf
+*.pdf binary
+*.png binary

@@ -1,0 +1,51 @@
+{
+  "id": "hoaSmokeTest0001",
+  "name": "Smoke Test",
+  "description": null,
+  "active": false,
+  "nodes": [
+    {
+      "id": "6c1f2b0e-5d3a-4f7e-9a41-0b8c2d6e7f10",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "a2d4e6f8-1b3c-4d5e-8f70-9a1b2c3d4e5f",
+      "name": "Return OK",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "jsCode": "// Proves the instance can import and run a workflow. Safe to delete once real workflows exist.\nreturn [{ json: { ok: true, at: new Date().toISOString() } }];"
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Return OK",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": null,
+  "nodeGroups": [],
+  "tags": []
+}

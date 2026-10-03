@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflow-json:
+    name: Workflow JSON checks
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash scripts/check_workflows.sh
+
+  gitleaks:
+    name: Secret scan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # Pinned image instead of gitleaks-action: same binary locally and in CI, no licence key.
+      - name: gitleaks (full history)
+        run: |
+          docker run --rm -v "$PWD:/repo" --entrypoint sh zricethezav/gitleaks:v8.30.1 -c \
+            'git config --global --add safe.directory /repo && gitleaks git /repo --redact --verbose'
+
+  python:
+    name: ruff + pytest
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: ruff format --check .
+      # Exit code 5 = no tests collected. Tolerated until data-gen/ and evals/ exist (P1).
+      - run: pytest || [ $? -eq 5 ]
+
+  smoke:
+    name: Compose up + import
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - run: cp .env.example .env
+      - run: docker compose up -d --wait --wait-timeout 300
+      - name: Migrations applied
+        run: |
+          docker compose exec -T postgres psql -U postgres -d ops -tAc \
+            "SELECT version FROM schema_migrations ORDER BY version" | tee applied.txt
+          expected=$(ls db/migrations/*.sql | xargs -n1 basename | sed 's/\.sql$//')
+          diff <(echo "$expected") applied.txt
+      - name: Migrations are idempotent
+        run: docker compose run --rm migrate | tee rerun.txt && grep -q "done, 0 applied" rerun.txt
+      - run: bash scripts/import.sh
+      - name: Import is idempotent and complete
+        run: |
+          bash scripts/import.sh
+          imported=$(docker compose exec -T n8n n8n list:workflow | grep -c '|' || true)
+          files=$(ls workflows/*.json | wc -l)
+          echo "imported=$imported files=$files"
+          [ "$imported" -eq "$files" ]
+      # Proves Code nodes run (task runner wired up), not just that JSON imports.
+      # Separate broker port because the running n8n already holds 5679.
+      - name: Smoke Test workflow executes
+        run: |
+          docker compose exec -T -e N8N_RUNNERS_BROKER_PORT=5680 n8n \
+            n8n execute --id hoaSmokeTest0001 | tee exec.txt
+          grep -q '"status": "success"' exec.txt
+      - name: Export round-trip leaves workflows/ unchanged
+        run: |
+          bash scripts/export.sh
+          git status --porcelain workflows/
+          git diff --exit-code workflows/
+          [ -z "$(git status --porcelain workflows/)" ]
+      - if: failure()
+        run: docker compose logs --no-color
+      - if: always()
+        run: docker compose down -v
