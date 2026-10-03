@@ -13,3 +13,6 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Generated data (deterministic; regenerate with data-gen/generate.py)
+data-gen/out/

@@ -4,7 +4,7 @@ Back-office automation for small/mid hotels on self-hosted n8n: reconcile suppli
 against purchase orders and receiving records, flag discrepancies with reason codes, and route
 everything through human approval.
 
-**Status:** Phase 0 (infra + CI). Full write-up arrives in P6.
+**Status:** P1 (synthetic data). Full write-up arrives in P6.
 
 ## Quickstart
 
@@ -20,6 +20,17 @@ n8n: http://localhost:5678 · Postgres (host): `localhost:5433`, databases `n8n`
 
 With local Ollama on the GPU: `docker compose --profile local-llm up -d`
 (reach it from n8n at `http://ollama:11434`).
+
+## Synthetic data
+
+```bash
+python -m pip install -r requirements.txt       # reportlab; Python 3.12
+python data-gen/generate.py --n 200 --seed 42   # PDFs + ground truth -> data-gen/out/
+bash scripts/seed.sh                            # suppliers, POs, receipts -> ops database
+```
+
+See [data-gen/README.md](data-gen/README.md) for the ground-truth format and
+[docs/synthetic-data-report.md](docs/synthetic-data-report.md) for the label distribution.
 
 ## Working on workflows
 
@@ -44,7 +55,8 @@ Plain SQL in `db/migrations/NNN_name.sql`, applied in order by the `migrate` ser
 docker-compose.yml   n8n + postgres + migrate (+ ollama profile)
 db/init/             first-start role/database creation
 db/migrations/       numbered SQL migrations for the ops database
+data-gen/            synthetic data generator + tests
 workflows/           exported n8n workflows, one file per workflow
-scripts/             init-env, import, export, migrate, check_workflows
+scripts/             init-env, import, export, migrate, seed, check_workflows
 docs/decisions.md    decisions log
 ```

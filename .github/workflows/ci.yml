@@ -43,14 +43,17 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: ruff check .
       - run: ruff format --check .
-      # Exit code 5 = no tests collected. Tolerated until data-gen/ and evals/ exist (P1).
-      - run: pytest || [ $? -eq 5 ]
+      - run: pytest
 
   smoke:
     name: Compose up + import
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
       - run: cp .env.example .env
       - run: docker compose up -d --wait --wait-timeout 300
       - name: Migrations applied
@@ -61,6 +64,25 @@ jobs:
           diff <(echo "$expected") applied.txt
       - name: Migrations are idempotent
         run: docker compose run --rm migrate | tee rerun.txt && grep -q "done, 0 applied" rerun.txt
+      - name: Seed master data (twice; second load must change nothing)
+        run: |
+          python data-gen/generate.py --n 200 --seed 42 > /dev/null
+          bash scripts/seed.sh | tee seeded.txt
+          bash scripts/seed.sh | diff seeded.txt -
+          python - <<'EOF'
+          import json
+          m = json.load(open("data-gen/out/master_data.json"))
+          expected = {
+              "suppliers": len(m["suppliers"]),
+              "purchase_orders": len(m["purchase_orders"]),
+              "purchase_order_lines": sum(len(po["lines"]) for po in m["purchase_orders"]),
+              "receipts": len(m["receipts"]),
+              "receipt_lines": sum(len(r["lines"]) for r in m["receipts"]),
+          }
+          seeded = {k: int(v) for k, v in (line.split() for line in open("seeded.txt") if line.strip())}
+          assert seeded == expected, (seeded, expected)
+          print("seeded counts match master_data.json")
+          EOF
       - run: bash scripts/import.sh
       - name: Import is idempotent and complete
         run: |
