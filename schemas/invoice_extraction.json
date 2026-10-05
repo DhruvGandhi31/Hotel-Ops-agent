@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hotel-ops-agent.local/schemas/invoice_extraction.json",
+  "title": "Invoice extraction",
+  "description": "What the LLM must return for one supplier invoice. Values are transcribed from the document as printed; nothing is calculated, corrected or inferred. Money is a decimal string in dollars (converted to integer cents by code, never by the model). Validated in the 'Validate Extraction' Code node; invalid output gets one retry, then needs_review.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "supplier_name",
+    "supplier_abn",
+    "bill_to_name",
+    "invoice_number",
+    "invoice_date",
+    "due_date",
+    "po_number",
+    "currency",
+    "lines",
+    "subtotal",
+    "gst",
+    "total"
+  ],
+  "properties": {
+    "supplier_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Name of the business issuing the invoice (the seller), not the customer."
+    },
+    "supplier_abn": {
+      "type": "string",
+      "pattern": "^[0-9]{2} ?[0-9]{3} ?[0-9]{3} ?[0-9]{3}$",
+      "description": "The seller's ABN, 11 digits. Spaces as printed are fine; code strips them."
+    },
+    "bill_to_name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Name of the customer being billed (the hotel)."
+    },
+    "invoice_number": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The supplier's invoice number, exactly as printed, including any prefix. Not the PO number, account number or delivery docket number."
+    },
+    "invoice_date": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+      "description": "Date the invoice was issued, as YYYY-MM-DD. Australian documents write dd/mm/yyyy: 03/08/2026 is 3 August 2026."
+    },
+    "due_date": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+      "description": "Payment due date as YYYY-MM-DD, or null if the invoice prints none."
+    },
+    "po_number": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "The customer's purchase order number as printed (labels vary: 'Customer PO', 'Your Order No.', 'Order Ref', 'Purchase Order'), or null if none is printed. Never guess or fill one in."
+    },
+    "currency": {
+      "type": "string",
+      "enum": ["AUD"],
+      "description": "Currency of the amounts."
+    },
+    "lines": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Every line item, in document order. Do not include subtotal, GST, total, delivery-docket or terms rows.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "supplier_code",
+          "description",
+          "quantity",
+          "unit",
+          "unit_price",
+          "gst_applicable",
+          "line_total",
+          "line_gst"
+        ],
+        "properties": {
+          "supplier_code": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "description": "The supplier's item code/SKU for this line if one is printed, else null."
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Line description as printed, without the supplier code or any tax marker symbol (^ or *)."
+          },
+          "quantity": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Quantity as printed (weighed items have decimals, e.g. 2.420)."
+          },
+          "unit": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "description": "Unit of measure exactly as printed on the line, in lowercase (each, kg, box, carton...). A unit that is part of the quantity text counts ('2.420 kg' gives kg). If the document prints no unit for the line, null; never infer one from the product."
+          },
+          "unit_price": {
+            "type": "string",
+            "pattern": "^[0-9]+\\.[0-9]{2}$",
+            "description": "Price per unit, ex GST, in dollars with two decimals. No currency symbol or thousands separator."
+          },
+          "gst_applicable": {
+            "type": "boolean",
+            "description": "True if GST applies to this line. Read it from the document's own marker (a Tax column showing GST vs FREE, a ^ or * symbol, or a per-line GST amount above 0.00). Do not decide it from what the item is."
+          },
+          "line_total": {
+            "type": "string",
+            "pattern": "^[0-9]+\\.[0-9]{2}$",
+            "description": "Line amount ex GST as printed. Copy it; do not recalculate."
+          },
+          "line_gst": {
+            "type": ["string", "null"],
+            "pattern": "^[0-9]+\\.[0-9]{2}$",
+            "description": "GST amount for this line if the invoice prints GST per line (a GST column), else null."
+          }
+        }
+      }
+    },
+    "subtotal": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]{2}$",
+      "description": "Total ex GST as printed. Copy it; do not recalculate."
+    },
+    "gst": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]{2}$",
+      "description": "Total GST as printed, even if it looks wrong. 0.00 if the invoice prints zero GST."
+    },
+    "total": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]{2}$",
+      "description": "Total payable including GST, as printed, even if it does not equal subtotal + GST."
+    }
+  }
+}

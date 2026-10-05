@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import GENERATOR_VERSION, config
 from .model import Dataset, InvoiceCase, Supplier
-from .render import render_invoice
+from .render import prints_unit, render_invoice
 
 
 def invoice_key(supplier_abn: str, invoice_number: str, total_cents: int) -> str:
@@ -105,7 +105,7 @@ def ground_truth(case: InvoiceCase, s: Supplier, by_case: dict[int, InvoiceCase]
                     "supplier_code": ln.supplier_code,
                     "description": ln.description,
                     "quantity": _num(ln.quantity),
-                    "unit": ln.unit,
+                    "unit": ln.unit if prints_unit(s.template, ln.unit) else None,
                     "unit_price_cents": ln.unit_price_cents,
                     "gst_applicable": ln.gst_applicable,
                     "line_total_cents": ln.line_total_cents,

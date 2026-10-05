@@ -342,8 +342,10 @@ def _inject_gst_error(
             offset = -offset
         stated, per_line = _compute_gst(totals, master, method)
         taxable = [i for i in idxs if master[i]]
-        if method == "line" and taxable and per_line[taxable[0]] + offset >= 0:
-            j = rng.choice([i for i in taxable if per_line[i] + offset >= 0])
+        # > 0, not >= 0: a taxable line printing GST 0.00 would be indistinguishable from GST-free.
+        fits = [i for i in taxable if per_line[i] + offset > 0] if method == "line" else []
+        if fits:
+            j = rng.choice(fits)
             per_line[j] += offset
             affected = [j]
         stated += offset
