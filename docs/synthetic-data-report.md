@@ -67,12 +67,12 @@ GST error variants: arithmetic_error 3, gst_on_gst_free 5, wrong_rate 6
 | Morning Ridge Coffee Roasters | coffee | C | 12 |
 
 - Lines per invoice: min 1, max 10, mean 4.5
-- Invoices mixing GST-free and taxable lines: 63
+- Invoices mixing GST-free and taxable lines: 62
 - Invoices with per-line GST rounding (template D): 47
 
 ## Master data (seed.sql)
 
 - Suppliers: 12
 - Purchase orders: 194 (18 never invoiced)
-- PO lines: 870
+- PO lines: 869
 - Receipts: 194

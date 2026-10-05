@@ -28,6 +28,15 @@ from .model import InvoiceCase, InvoiceDocument, Supplier
 from .money import format_money
 
 
+def prints_unit(template: str, unit: str) -> bool:
+    """Whether a line's unit of measure appears anywhere on the printed invoice.
+
+    Template C (till-receipt) only prints a unit for weighed goods ("2.420 kg x ...").
+    The ground truth must say null where nothing is printed, or no extractor could be right.
+    """
+    return template != "C" or unit == "kg"
+
+
 def render_invoice(case: InvoiceCase, supplier: Supplier) -> bytes:
     return _TEMPLATES[supplier.template](case, supplier)
 

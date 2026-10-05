@@ -64,6 +64,11 @@ jobs:
           diff <(echo "$expected") applied.txt
       - name: Migrations are idempotent
         run: docker compose run --rm migrate | tee rerun.txt && grep -q "done, 0 applied" rerun.txt
+      - name: invoice_key_of() in Postgres matches data-gen's invoice_key()
+        run: |
+          # Same vector as test_invoice_key_known_vector in data-gen/tests/test_primitives.py
+          got=$(docker compose exec -T postgres psql -U postgres -d ops -tAc "SELECT invoice_key_of('51824753556', ' inv-1 ', 100)")
+          [ "$got" = "5724b35020e9eb048d47c1583989c74ee868d18306f42c34a480d685608eb344" ]
       - name: Seed master data (twice; second load must change nothing)
         run: |
           python data-gen/generate.py --n 200 --seed 42 > /dev/null

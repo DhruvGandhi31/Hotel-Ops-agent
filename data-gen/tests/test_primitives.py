@@ -50,3 +50,11 @@ def test_format_money():
 def test_invoice_key_separates_fields():
     assert invoice_key("51824753556", "INV1", 23) != invoice_key("51824753556", "INV12", 3)
     assert invoice_key("51 824 753 556", " inv-1 ", 100) == invoice_key("51824753556", "INV-1", 100)
+
+
+def test_invoice_key_known_vector():
+    """Also asserted against Postgres's invoice_key_of() in CI (smoke job); keep both in step."""
+    assert invoice_key("51 824 753 556", " inv-1 ", 100) == KNOWN_KEY
+
+
+KNOWN_KEY = "5724b35020e9eb048d47c1583989c74ee868d18306f42c34a480d685608eb344"

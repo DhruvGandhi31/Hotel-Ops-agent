@@ -1,0 +1,7 @@
+# Extends gitleaks' default rules; allowlists only the specific test vector below.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Known-answer SHA-256 for invoice_key(): sha256('51824753556|INV-1|100'). A public test vector, not a credential."
+regexes = ['''5724b35020e9eb048d47c1583989c74ee868d18306f42c34a480d685608eb344''']
