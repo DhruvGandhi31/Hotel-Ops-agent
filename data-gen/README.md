@@ -27,7 +27,7 @@ and a test fails if it goes stale.
 
 ## Ground truth contract
 
-`document` is exactly what is printed on the PDF: the extraction target for P2. Money is integer
+`document` is exactly what is printed on the PDF: the extraction target for P2. Where a layout prints no unit for a line (the till-style template prints one only for weighed goods), `unit` is `null`; on per-line-GST invoices a taxable line never prints GST 0.00, so `gst_applicable` is always readable from the page. Money is integer
 cents ex GST, dates are ISO, `po_number` is as printed (one supplier prints `PO004512` rather
 than `PO-004512`) or `null` when absent, and `quantity` is a number.
 

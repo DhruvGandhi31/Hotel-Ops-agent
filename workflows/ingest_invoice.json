@@ -1,0 +1,796 @@
+{
+  "id": "hoaIngestInvoice1",
+  "name": "Ingest Invoice",
+  "description": null,
+  "active": true,
+  "nodes": [
+    {
+      "id": "994b56cb-9b3e-5c11-9db8-267ef413df07",
+      "name": "Upload Invoice",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "b4da3364-5dad-5d62-aaab-8229749f3cad",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "invoice-upload",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "hoaCredIngestTk1",
+          "name": "Ingest Webhook Token"
+        }
+      }
+    },
+    {
+      "id": "30b7b605-f094-542e-94b5-380bfa55fcde",
+      "name": "Hash File",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// Fingerprint the upload and reject anything that cannot be an invoice PDF.\n// Rejections are returned as data (accepted: false) so the workflow can answer with a 4xx\n// instead of failing the execution.\nconst crypto = require('crypto');\nconst MAX_BYTES = 10 * 1024 * 1024;\n\nconst item = $input.first();\nconst upload = item.binary && item.binary.file;\nif (!upload) {\n  return [{ json: { accepted: false, status_code: 400, reason: 'multipart form field \"file\" is required' } }];\n}\n\nconst buf = await this.helpers.getBinaryDataBuffer(0, 'file');\nif (buf.length > MAX_BYTES) {\n  return [{ json: { accepted: false, status_code: 413, reason: 'file is larger than 10 MB' } }];\n}\nif (buf.subarray(0, 5).toString('latin1') !== '%PDF-') {\n  return [{ json: { accepted: false, status_code: 415, reason: 'file is not a PDF' } }];\n}\n\nreturn [\n  {\n    json: {\n      accepted: true,\n      file_sha256: crypto.createHash('sha256').update(buf).digest('hex'),\n      filename: upload.fileName || 'upload.pdf',\n      size_bytes: buf.length,\n    },\n    binary: item.binary,\n  },\n];\n"
+      }
+    },
+    {
+      "id": "d28b6c4b-e265-5832-8f86-1c28648c0d36",
+      "name": "Upload Accepted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "be33f2ca-d37e-5edb-b26b-b457822b4a23",
+              "leftValue": "={{ $json.accepted }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "d78dcb53-e53d-54b5-b038-175a9655be73",
+      "name": "Check Existing File",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        720,
+        200
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT invoice_file_status($1) AS result",
+        "options": {
+          "queryReplacement": "={{ [$json.file_sha256] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "hoaCredOpsPg0001",
+          "name": "Ops Postgres"
+        }
+      }
+    },
+    {
+      "id": "27295831-8793-5811-ae69-7a763301c878",
+      "name": "Already Processed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        960,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d1778a7d-1865-588f-8341-93c134f8d1f8",
+              "leftValue": "={{ $json.result.status }}",
+              "rightValue": "noop",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "f8c82060-6892-51eb-842b-7a14d6b6d53b",
+      "name": "Restore Upload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        280
+      ],
+      "parameters": {
+        "jsCode": "// The database lookup replaced the item, so put the upload (and its PDF) back for text extraction.\nconst upload = $('Hash File').first();\nreturn [{ json: upload.json, binary: upload.binary }];\n"
+      }
+    },
+    {
+      "id": "d67eaf06-2f26-503f-a87e-1841a0a30e49",
+      "name": "Extract PDF Text",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1440,
+        280
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://pdf-text:8000/extract",
+        "sendBody": true,
+        "contentType": "binaryData",
+        "inputDataFieldName": "file",
+        "options": {
+          "timeout": 60000
+        }
+      }
+    },
+    {
+      "id": "a49647fd-97f6-5224-8050-4a9dc4656d86",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        280
+      ],
+      "parameters": {
+        "jsCode": "// Builds the model prompt from the same files the eval harness reads (prompts/, schemas/), so\n// what is measured is what runs. Mirrors evals/hotel_evals/extract.py: build_system_prompt,\n// first_user_message and strip_descriptions. A test runs this code and compares the output.\nconst fs = require('fs');\nconst DIR = '/opt/hotel-ops';\nconst MIN_TEXT_CHARS = 20; // below this the PDF has no usable text layer (scanned/image-only)\nconst ANNOTATIONS = ['description', '$schema', '$id', 'title'];\n\n// Drop schema prose (it is already in the rules) but keep structure. Only string-valued\n// annotation keys go: a property that is itself *named* \"description\" has an object value.\nconst strip = (node) => {\n  if (Array.isArray(node)) return node.map(strip);\n  if (node && typeof node === 'object') {\n    return Object.fromEntries(\n      Object.entries(node)\n        .filter(([k, v]) => !(ANNOTATIONS.includes(k) && typeof v === 'string'))\n        .map(([k, v]) => [k, strip(v)]),\n    );\n  }\n  return node;\n};\n\nconst schema = JSON.parse(fs.readFileSync(`${DIR}/schemas/invoice_extraction.json`, 'utf8'));\nconst template = fs.readFileSync(`${DIR}/prompts/invoice_extraction.md`, 'utf8');\nif (!template.includes('{{SCHEMA}}')) throw new Error('prompt file lost its {{SCHEMA}} placeholder');\nconst system = template.replace('{{SCHEMA}}', () => JSON.stringify(strip(schema)));\n\nconst upload = $('Hash File').first().json;\nconst extracted = $input.first().json; // pdf-text service: {text, pages} or {text: '', error}\nconst invoiceText = String(extracted.text ?? '');\n\nreturn [\n  {\n    json: {\n      file_sha256: upload.file_sha256,\n      filename: upload.filename,\n      invoice_text: invoiceText,\n      has_text: invoiceText.trim().length >= MIN_TEXT_CHARS,\n      pdf_error: extracted.error ?? null,\n      system,\n      user: `Invoice text:\\n\\n${invoiceText}`,\n      attempt: 1,\n    },\n  },\n];\n"
+      }
+    },
+    {
+      "id": "db17ae5d-cb75-55e8-b337-c15224acb710",
+      "name": "Has Text?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1920,
+        280
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "2c8071c0-addf-52f7-8e4c-943c1aabcd53",
+              "leftValue": "={{ $json.has_text }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "69da2462-4cad-51dd-a3d2-d3c3699886d0",
+      "name": "Extract Invoice Fields",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        2160,
+        160
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.user }}",
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "={{ $json.system }}"
+            }
+          ]
+        },
+        "batching": {}
+      }
+    },
+    {
+      "id": "7a0a40f2-3f03-5377-8369-cb4a43567865",
+      "name": "Ollama Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        380
+      ],
+      "parameters": {
+        "model": "qwen3.5:9b",
+        "options": {
+          "numCtx": 4096,
+          "numPredict": 4096,
+          "temperature": 0,
+          "format": "json",
+          "think": false
+        }
+      },
+      "credentials": {
+        "ollamaApi": {
+          "id": "hoaCredOllama001",
+          "name": "Ollama"
+        }
+      }
+    },
+    {
+      "id": "d736b169-dd2f-56c0-b81d-2859a1cd00aa",
+      "name": "Validate Extraction",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        160
+      ],
+      "parameters": {
+        "jsCode": "// CLAUDE.md principle 2: every LLM output is validated before it goes anywhere.\n//\n// Validates against schemas/invoice_extraction.json, the same file the eval reads, plus the\n// checks a schema cannot express. Mirrors validation_errors() in evals/hotel_evals/extract.py;\n// tests/test_workflow_code.py feeds both the same inputs and compares the verdicts.\n//\n// Why not ajv: the Code node sandbox forbids code generation (ajv builds validators with\n// `new Function`), so it cannot compile a schema here. This is a small interpreter instead. It\n// supports exactly the keywords our schemas use and THROWS on any other keyword, so a schema\n// change can never be silently ignored; it fails the workflow loudly instead.\nconst fs = require('fs');\n\nconst DIR = '/opt/hotel-ops';\nconst ABN_WEIGHTS = [10, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19];\n\n// Annotations carry no constraint. `format` is one: dates are checked for real below.\nconst ANNOTATIONS = ['$schema', '$id', 'title', 'description', 'format'];\nconst CONSTRAINTS = [\n  'type', 'enum', 'pattern', 'minLength', 'exclusiveMinimum', 'maximum',\n  'minItems', 'items', 'required', 'properties', 'additionalProperties',\n];\n\n// One validator run per attempt, so the run index is the attempt number.\nconst attempt = $runIndex + 1;\n\n// What the chain node hands over depends on the model's JSON mode: with `format: json` n8n parses\n// the reply itself and emits the fields directly; otherwise (or if it could not parse) it emits\n// {text}. A failed call arrives as {error} because the node is set to continue on error.\nconst reply = $input.first().json;\nconst isText = typeof reply.text === 'string' && Object.keys(reply).length === 1;\nconst modelError = reply.error !== undefined ? String(reply.error.message ?? reply.error) : undefined;\nconst raw = isText ? reply.text : modelError !== undefined ? '' : JSON.stringify(reply);\nconst schema = JSON.parse(fs.readFileSync(`${DIR}/schemas/invoice_extraction.json`, 'utf8'));\n\nconst jsonType = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);\n\nconst assertSupported = (node, path) => {\n  for (const [key, value] of Object.entries(node)) {\n    if (!ANNOTATIONS.includes(key) && !CONSTRAINTS.includes(key)) {\n      throw new Error(`schema keyword \"${key}\" at ${path || '(root)'} is not supported by this validator`);\n    }\n    if (key === 'properties') {\n      for (const [name, sub] of Object.entries(value)) assertSupported(sub, `${path}/${name}`);\n    } else if (key === 'items') {\n      assertSupported(value, `${path}/items`);\n    } else if (key === 'type') {\n      for (const t of [].concat(value)) {\n        if (!['string', 'number', 'boolean', 'null', 'object', 'array'].includes(t)) {\n          throw new Error(`schema type \"${t}\" at ${path || '(root)'} is not supported by this validator`);\n        }\n      }\n    }\n  }\n};\nassertSupported(schema, '');\n\nconst check = (node, value, path, errors) => {\n  const where = path || '(root)';\n  if (node.type !== undefined) {\n    const allowed = [].concat(node.type);\n    if (!allowed.includes(jsonType(value))) {\n      errors.push(`${where}: expected ${allowed.join(' or ')}, got ${jsonType(value)}`);\n      return;\n    }\n  }\n  if (node.enum !== undefined && !node.enum.includes(value)) {\n    errors.push(`${where}: ${JSON.stringify(value)} is not one of ${JSON.stringify(node.enum)}`);\n  }\n  if (typeof value === 'string') {\n    if (node.minLength !== undefined && [...value].length < node.minLength) {\n      errors.push(`${where}: shorter than ${node.minLength} characters`);\n    }\n    if (node.pattern !== undefined && !new RegExp(node.pattern, 'u').test(value)) {\n      errors.push(`${where}: ${JSON.stringify(value)} does not match ${node.pattern}`);\n    }\n  }\n  if (typeof value === 'number') {\n    if (node.exclusiveMinimum !== undefined && !(value > node.exclusiveMinimum)) {\n      errors.push(`${where}: ${value} must be greater than ${node.exclusiveMinimum}`);\n    }\n    if (node.maximum !== undefined && value > node.maximum) {\n      errors.push(`${where}: ${value} is greater than the maximum ${node.maximum}`);\n    }\n  }\n  if (Array.isArray(value)) {\n    if (node.minItems !== undefined && value.length < node.minItems) {\n      errors.push(`${where}: fewer than ${node.minItems} items`);\n    }\n    if (node.items !== undefined) value.forEach((v, i) => check(node.items, v, `${path}/${i + 1}`, errors));\n  }\n  if (jsonType(value) === 'object') {\n    for (const key of node.required ?? []) {\n      if (!(key in value)) errors.push(`${where}: '${key}' is a required property`);\n    }\n    const props = node.properties ?? {};\n    if (node.additionalProperties === false) {\n      for (const key of Object.keys(value)) {\n        if (!(key in props)) errors.push(`${where}: unexpected property '${key}'`);\n      }\n    }\n    for (const [key, sub] of Object.entries(props)) {\n      if (key in value) check(sub, value[key], `${path}/${key}`, errors);\n    }\n  }\n};\n\nconst isRealDate = (s) => {\n  const d = new Date(`${s}T00:00:00Z`);\n  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s && Number(s.slice(0, 4)) >= 1900;\n};\nconst abnOk = (abn) => {\n  const digits = String(abn).replace(/\\s+/g, '');\n  if (!/^\\d{11}$/.test(digits)) return false;\n  const nums = [...digits].map(Number);\n  nums[0] -= 1;\n  return nums.reduce((sum, d, i) => sum + d * ABN_WEIGHTS[i], 0) % 89 === 0;\n};\n\nconst errorsFor = (output) => {\n  const errors = [];\n  check(schema, output, '', errors);\n  if (errors.length > 0) return errors.slice(0, 12);\n\n  for (const key of ['invoice_date', 'due_date']) {\n    if (output[key] !== null && !isRealDate(output[key])) {\n      errors.push(`${key}: '${output[key]}' is not a real calendar date`);\n    }\n  }\n  output.lines.forEach((line, i) => {\n    if (Number(line.quantity.toFixed(3)) !== line.quantity) {\n      errors.push(`lines/${i + 1}/quantity: ${line.quantity} has more than 3 decimal places`);\n    }\n  });\n  if (!abnOk(output.supplier_abn)) {\n    errors.push(`supplier_abn: '${output.supplier_abn}' fails the ABN checksum; re-read it from the document`);\n  }\n  return errors;\n};\n\n// Only a parse failure is the model's fault; anything thrown by the validator itself is a bug\n// and must fail the execution, not be reported to the model as bad JSON.\nlet parsed;\nlet errors;\nif (modelError !== undefined) {\n  // The chain reports unparseable model output and a failed call the same way, by message. Bad JSON\n  // is the model's fault and gets the one retry. Anything else (server down, timeout, 5xx) is\n  // infrastructure: fail the execution so it is audited, the caller gets a 5xx, the file is NOT\n  // recorded, and uploading it again once the server is back works. Recording it as needs_review\n  // would make an outage permanent for every file that arrived during it.\n  if (!/JSON/i.test(modelError)) throw new Error(`model server failure: ${modelError}`);\n  errors = [`output is not valid JSON (${modelError})`];\n} else {\n  try {\n    parsed = JSON.parse(raw);\n  } catch (e) {\n    errors = [`output is not valid JSON (${e.message})`];\n  }\n}\nif (errors === undefined) errors = errorsFor(parsed);\n\nif (errors.length === 0) {\n  return [{ json: { valid: true, attempt, extraction: parsed, raw, errors: [] } }];\n}\nreturn [{ json: { valid: false, attempt, errors, raw } }];\n"
+      }
+    },
+    {
+      "id": "5703f0d5-ff94-5ef1-abd4-fa2193665d33",
+      "name": "Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2640,
+        160
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "055fb128-7076-55d3-89c1-690d9adae715",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "1e274769-2f5f-5af9-95f0-a31f111625d1",
+      "name": "Prepare Ingest Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        60
+      ],
+      "parameters": {
+        "jsCode": "// One payload for the one database call (ingest_invoice, migration 004).\nconst ctx = $('Build Prompt').first().json;\nconst verdict = $input.first().json; // Validate Extraction, attempt that passed\n\nreturn [\n  {\n    json: {\n      payload: {\n        file_sha256: ctx.file_sha256,\n        filename: ctx.filename,\n        attempts: verdict.attempt,\n        llm_model: $('Ollama Chat Model').params.model,\n        execution_id: $execution.id,\n        workflow_id: $workflow.id,\n        workflow_name: $workflow.name,\n        extraction: verdict.extraction,\n      },\n    },\n  },\n];\n"
+      }
+    },
+    {
+      "id": "24329d8f-cdef-5055-8e6b-6fbfbd0d89f1",
+      "name": "Ingest Invoice Record",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        3120,
+        60
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT ingest_invoice($1::jsonb) AS result",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($json.payload)] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "hoaCredOpsPg0001",
+          "name": "Ops Postgres"
+        }
+      }
+    },
+    {
+      "id": "8a08c18b-52d6-5141-ad3b-e279e2b30f90",
+      "name": "Extracted Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3360,
+        60
+      ],
+      "parameters": {
+        "jsCode": "const result = $input.first().json.result;\nconst ctx = $('Build Prompt').first().json;\nconst verdict = $('Validate Extraction').last().json;\nreturn [\n  {\n    json: {\n      status_code: 200,\n      body: {\n        ...result,\n        file_sha256: ctx.file_sha256,\n        attempts: verdict.attempt,\n        llm_model: $('Ollama Chat Model').params.model,\n        extraction: verdict.extraction,\n      },\n    },\n  },\n];\n"
+      }
+    },
+    {
+      "id": "c460bd6b-89f9-5810-8574-9711b6382b8d",
+      "name": "Can Retry?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2880,
+        260
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "f8496eb7-d4e4-5710-8675-999f142ff3e0",
+              "leftValue": "={{ $json.attempt }}",
+              "rightValue": 2,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "1c83d2a5-537f-5880-b668-eef1ea9fed75",
+      "name": "Build Retry Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3120,
+        260
+      ],
+      "parameters": {
+        "jsCode": "// The one retry (CLAUDE.md: the validation error is appended to the prompt). A single user\n// message, identical to evals/hotel_evals/extract.py: retry_user_message.\nconst fs = require('fs');\n\nconst ctx = $('Build Prompt').first().json;\nconst failed = $input.first().json; // Validate Extraction's verdict for the attempt that just failed\n\nlet user = fs.readFileSync('/opt/hotel-ops/prompts/invoice_extraction_retry.md', 'utf8');\nconst fill = [\n  ['{{INVOICE_TEXT}}', ctx.invoice_text],\n  ['{{PREVIOUS_OUTPUT}}', failed.raw],\n  ['{{ERRORS}}', failed.errors.map((e) => `- ${e}`).join('\\n')],\n];\nfor (const [key, value] of fill) user = user.split(key).join(value);\n\nreturn [{ json: { system: ctx.system, user, attempt: failed.attempt + 1 } }];\n"
+      }
+    },
+    {
+      "id": "a05e7cad-265a-5faa-9d97-0c6cf25a5451",
+      "name": "Prepare Needs Review Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3120,
+        460
+      ],
+      "parameters": {
+        "jsCode": "// Two routes end here: no text layer (no model call was made), or validation failed twice.\nconst ctx = $('Build Prompt').first().json;\nconst incoming = $input.first().json;\nconst noText = incoming.has_text === false;\n\nreturn [\n  {\n    json: {\n      payload: {\n        file_sha256: ctx.file_sha256,\n        filename: ctx.filename,\n        attempts: noText ? 0 : incoming.attempt,\n        llm_model: noText ? null : $('Ollama Chat Model').params.model,\n        reason: noText\n          ? incoming.pdf_error\n            ? `the PDF could not be read: ${incoming.pdf_error}`\n            : 'no extractable text layer (scanned or image-only PDF)'\n          : incoming.errors.join('; ').slice(0, 2000),\n        last_output: noText ? null : incoming.raw,\n        execution_id: $execution.id,\n        workflow_id: $workflow.id,\n        workflow_name: $workflow.name,\n      },\n    },\n  },\n];\n"
+      }
+    },
+    {
+      "id": "5d5dd598-f8bf-522e-bae9-aac89071ea59",
+      "name": "Record Needs Review",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        3360,
+        460
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT record_needs_review($1::jsonb) AS result",
+        "options": {
+          "queryReplacement": "={{ [JSON.stringify($json.payload)] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "hoaCredOpsPg0001",
+          "name": "Ops Postgres"
+        }
+      }
+    },
+    {
+      "id": "fca100b5-1131-573c-81db-77971bffa6d9",
+      "name": "Needs Review Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3600,
+        460
+      ],
+      "parameters": {
+        "jsCode": "const recorded = $input.first().json.result;\nconst { payload } = $('Prepare Needs Review Payload').first().json;\nreturn [\n  {\n    json: {\n      status_code: 200,\n      body: {\n        ...recorded,\n        file_sha256: payload.file_sha256,\n        attempts: payload.attempts,\n        llm_model: payload.llm_model,\n        reason: payload.reason,\n      },\n    },\n  },\n];\n"
+      }
+    },
+    {
+      "id": "8ad42d20-c080-59d2-848a-98eaa197c93d",
+      "name": "Noop Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        100
+      ],
+      "parameters": {
+        "jsCode": "const known = $input.first().json.result;\nconst upload = $('Hash File').first().json;\nreturn [{ json: { status_code: 200, body: { ...known, file_sha256: upload.file_sha256 } } }];\n"
+      }
+    },
+    {
+      "id": "a881d4fe-e792-5521-9189-5b5e5bc3d712",
+      "name": "Bad Upload Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        460
+      ],
+      "parameters": {
+        "jsCode": "const rejected = $input.first().json;\nreturn [{ json: { status_code: rejected.status_code, body: { status: 'rejected', reason: rejected.reason } } }];\n"
+      }
+    },
+    {
+      "id": "2555c970-aecf-55fe-94be-036b36039412",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        3840,
+        300
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.body }}",
+        "options": {
+          "responseCode": "={{ $json.status_code }}"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Upload Invoice": {
+      "main": [
+        [
+          {
+            "node": "Hash File",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Hash File": {
+      "main": [
+        [
+          {
+            "node": "Upload Accepted?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload Accepted?": {
+      "main": [
+        [
+          {
+            "node": "Check Existing File",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Bad Upload Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Existing File": {
+      "main": [
+        [
+          {
+            "node": "Already Processed?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Processed?": {
+      "main": [
+        [
+          {
+            "node": "Noop Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Restore Upload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Restore Upload": {
+      "main": [
+        [
+          {
+            "node": "Extract PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract PDF Text": {
+      "main": [
+        [
+          {
+            "node": "Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Has Text?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Text?": {
+      "main": [
+        [
+          {
+            "node": "Extract Invoice Fields",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Needs Review Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Extract Invoice Fields",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Invoice Fields": {
+      "main": [
+        [
+          {
+            "node": "Validate Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Extraction": {
+      "main": [
+        [
+          {
+            "node": "Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Ingest Payload",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Can Retry?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Ingest Payload": {
+      "main": [
+        [
+          {
+            "node": "Ingest Invoice Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ingest Invoice Record": {
+      "main": [
+        [
+          {
+            "node": "Extracted Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Can Retry?": {
+      "main": [
+        [
+          {
+            "node": "Build Retry Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Needs Review Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Retry Prompt": {
+      "main": [
+        [
+          {
+            "node": "Extract Invoice Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Needs Review Payload": {
+      "main": [
+        [
+          {
+            "node": "Record Needs Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Needs Review": {
+      "main": [
+        [
+          {
+            "node": "Needs Review Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extracted Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Review Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Noop Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bad Upload Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "hoaErrorHandler01"
+  },
+  "meta": null,
+  "nodeGroups": [],
+  "tags": []
+}

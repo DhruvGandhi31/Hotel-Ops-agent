@@ -8,48 +8,16 @@ negative cases pin down what the validator has to reject before output reaches t
 import copy
 import json
 import re
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from jsonschema import Draft202012Validator
 
+from hotel_evals.oracle import truth_to_extraction
+
 from .test_output import _text
 
 SCHEMA_PATH = Path(__file__).parents[2] / "schemas" / "invoice_extraction.json"
-
-
-def _dollars(cents: int | None) -> str | None:
-    return None if cents is None else f"{Decimal(cents) / 100:.2f}"
-
-
-def truth_to_extraction(doc: dict) -> dict:
-    return {
-        "supplier_name": doc["supplier_name"],
-        "supplier_abn": doc["supplier_abn"],
-        "bill_to_name": doc["bill_to_name"],
-        "invoice_number": doc["invoice_number"],
-        "invoice_date": doc["invoice_date"],
-        "due_date": doc["due_date"],
-        "po_number": doc["po_number"],
-        "currency": doc["currency"],
-        "lines": [
-            {
-                "supplier_code": ln["supplier_code"],
-                "description": ln["description"],
-                "quantity": ln["quantity"],
-                "unit": ln["unit"],
-                "unit_price": _dollars(ln["unit_price_cents"]),
-                "gst_applicable": ln["gst_applicable"],
-                "line_total": _dollars(ln["line_total_cents"]),
-                "line_gst": _dollars(ln["gst_cents"]),
-            }
-            for ln in doc["lines"]
-        ],
-        "subtotal": _dollars(doc["subtotal_cents"]),
-        "gst": _dollars(doc["gst_cents"]),
-        "total": _dollars(doc["total_cents"]),
-    }
 
 
 @pytest.fixture(scope="module")

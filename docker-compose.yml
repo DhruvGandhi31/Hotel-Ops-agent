@@ -46,6 +46,23 @@ services:
       - ./scripts/migrate.sh:/usr/local/bin/migrate.sh:ro
     entrypoint: ["sh", "/usr/local/bin/migrate.sh"]
 
+  # PDF text extraction. The same pypdf code the eval harness uses, so the model sees the same text
+  # in evals and in production (n8n's Extract From File space-joins table cells and costs ~9 points
+  # of line-item accuracy). Not published to the host; only n8n reaches it.
+  pdf-text:
+    build: ./services/pdf-text
+    image: hotel-ops-agent/pdf-text:1
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status == 200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
   n8n:
     image: n8nio/n8n:2.41.6
     restart: unless-stopped
@@ -54,6 +71,8 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      pdf-text:
+        condition: service_healthy
     environment:
       DB_TYPE: postgresdb
       DB_POSTGRESDB_HOST: postgres
@@ -66,7 +85,7 @@ services:
       N8N_HOST: localhost
       N8N_PORT: 5678
       N8N_PROTOCOL: http
-      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678/}
+      N8N_WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678/}
       GENERIC_TIMEZONE: ${TZ:-Australia/Sydney}
       TZ: ${TZ:-Australia/Sydney}
       N8N_DIAGNOSTICS_ENABLED: "false"
@@ -75,8 +94,17 @@ services:
       N8N_MCP_ACCESS_ENABLED: ${N8N_MCP_ACCESS_ENABLED:-false}
       EXECUTIONS_DATA_PRUNE: "true"
       EXECUTIONS_DATA_MAX_AGE: ${EXECUTIONS_DATA_MAX_AGE:-336}
+      # Code nodes may use exactly these built-in modules and no external ones: crypto hashes
+      # uploads, fs reads the mounted prompt and schema files.
+      NODE_FUNCTION_ALLOW_BUILTIN: crypto,fs
     volumes:
       - n8n_data:/home/node/.n8n
+      # Single source of truth for prompts and schemas: the eval harness and the workflow read these files.
+      - ./prompts:/opt/hotel-ops/prompts:ro
+      - ./schemas:/opt/hotel-ops/schemas:ro
+    extra_hosts:
+      # Reach Ollama running on the Docker host. Built in on Docker Desktop; needed on Linux (CI).
+      - "host.docker.internal:host-gateway"
     ports:
       - "127.0.0.1:${N8N_HOST_PORT:-5678}:5678"
     healthcheck:
