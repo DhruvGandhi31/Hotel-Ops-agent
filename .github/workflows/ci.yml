@@ -46,21 +46,21 @@ jobs:
       - run: pytest
 
   smoke:
-    name: Compose up + import
+    name: Stack and ingestion pipeline (mock model)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
       - run: cp .env.example .env
       - run: docker compose up -d --wait --wait-timeout 300
       - name: Migrations applied
         run: |
           docker compose exec -T postgres psql -U postgres -d ops -tAc \
             "SELECT version FROM schema_migrations ORDER BY version" | tee applied.txt
-          expected=$(ls db/migrations/*.sql | xargs -n1 basename | sed 's/\.sql$//')
+          expected=$(for f in db/migrations/*.sql; do basename "$f" .sql; done)
           diff <(echo "$expected") applied.txt
       - name: Migrations are idempotent
         run: docker compose run --rm migrate | tee rerun.txt && grep -q "done, 0 applied" rerun.txt
@@ -69,6 +69,8 @@ jobs:
           # Same vector as test_invoice_key_known_vector in data-gen/tests/test_primitives.py
           got=$(docker compose exec -T postgres psql -U postgres -d ops -tAc "SELECT invoice_key_of('51824753556', ' inv-1 ', 100)")
           [ "$got" = "5724b35020e9eb048d47c1583989c74ee868d18306f42c34a480d685608eb344" ]
+      - name: Ingestion functions (db/tests)
+        run: bash scripts/test-db.sh
       - name: Seed master data (twice; second load must change nothing)
         run: |
           python data-gen/generate.py --n 200 --seed 42 > /dev/null
@@ -88,21 +90,31 @@ jobs:
           assert seeded == expected, (seeded, expected)
           print("seeded counts match master_data.json")
           EOF
-      - run: bash scripts/import.sh
+      - name: Credentials (Ollama pointed at the mock model)
+        run: OLLAMA_BASE_URL=http://host.docker.internal:11500 bash scripts/setup-credentials.sh
+      - name: Import and publish workflows
+        run: bash scripts/import.sh
       - name: Import is idempotent and complete
         run: |
           bash scripts/import.sh
           imported=$(docker compose exec -T n8n n8n list:workflow | grep -c '|' || true)
-          files=$(ls workflows/*.json | wc -l)
+          files=$(printf '%s\n' workflows/*.json | wc -l)
           echo "imported=$imported files=$files"
           [ "$imported" -eq "$files" ]
-      # Proves Code nodes run (task runner wired up), not just that JSON imports.
-      # Separate broker port because the running n8n already holds 5679.
-      - name: Smoke Test workflow executes
+      - name: Start the mock model
         run: |
-          docker compose exec -T -e N8N_RUNNERS_BROKER_PORT=5680 n8n \
-            n8n execute --id hoaSmokeTest0001 | tee exec.txt
-          grep -q '"status": "success"' exec.txt
+          python evals/mock_ollama.py --data data-gen/out --port 11500 > mock.log 2>&1 &
+          for _ in $(seq 1 30); do curl -sf http://127.0.0.1:11500/api/version && break; sleep 1; done
+      - name: Pipeline behaviour (retry, needs_review, outage, bad uploads, idempotency)
+        run: |
+          set -a; . ./.env; set +a
+          python evals/pipeline_check.py
+      - name: Ingest the dataset through the webhook (mock model, pipeline test only)
+        run: |
+          set -a; . ./.env; set +a
+          bash scripts/reset-ingestion.sh
+          curl -sf -X POST http://127.0.0.1:11500/__mode -d '{"mode":"oracle"}'
+          python evals/run.py --suite extraction --target n8n --mock --limit 100 --out "$RUNNER_TEMP/eval"
       - name: Export round-trip leaves workflows/ unchanged
         run: |
           bash scripts/export.sh
@@ -110,6 +122,8 @@ jobs:
           git diff --exit-code workflows/
           [ -z "$(git status --porcelain workflows/)" ]
       - if: failure()
-        run: docker compose logs --no-color
+        run: |
+          docker compose logs --no-color
+          cat mock.log || true
       - if: always()
         run: docker compose down -v

@@ -1,0 +1,61 @@
+{
+  "id": "hoaErrorHandler01",
+  "name": "Error Handler",
+  "description": null,
+  "active": true,
+  "nodes": [
+    {
+      "id": "a3d8a51b-c11a-5421-84fd-d5905a62448b",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "f4bedc0e-8fac-53fa-afac-72f5fd358b49",
+      "name": "Record Workflow Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        240,
+        0
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO audit_log (actor, action, entity_type, entity_id, workflow_id, execution_id, details) VALUES ('system', 'workflow.error', 'workflow', $1, $1, $2, $3::jsonb)",
+        "options": {
+          "queryReplacement": "={{ [$json.workflow.id, String($json.execution.id), JSON.stringify({ workflow_name: $json.workflow.name, failed_node: $json.execution.lastNodeExecuted ?? null, message: $json.execution.error?.message ?? null, execution_url: $json.execution.url ?? null })] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "hoaCredOpsPg0001",
+          "name": "Ops Postgres"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Record Workflow Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": null,
+  "nodeGroups": [],
+  "tags": []
+}

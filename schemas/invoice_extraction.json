@@ -92,7 +92,8 @@
           "quantity": {
             "type": "number",
             "exclusiveMinimum": 0,
-            "description": "Quantity as printed (weighed items have decimals, e.g. 2.420)."
+            "maximum": 1000000,
+            "description": "Quantity as printed (weighed items have decimals, e.g. 2.420), at most 3 decimal places."
           },
           "unit": {
             "type": ["string", "null"],
@@ -101,7 +102,7 @@
           },
           "unit_price": {
             "type": "string",
-            "pattern": "^[0-9]+\\.[0-9]{2}$",
+            "pattern": "^[0-9]{1,12}\\.[0-9]{2}$",
             "description": "Price per unit, ex GST, in dollars with two decimals. No currency symbol or thousands separator."
           },
           "gst_applicable": {
@@ -110,12 +111,12 @@
           },
           "line_total": {
             "type": "string",
-            "pattern": "^[0-9]+\\.[0-9]{2}$",
+            "pattern": "^[0-9]{1,12}\\.[0-9]{2}$",
             "description": "Line amount ex GST as printed. Copy it; do not recalculate."
           },
           "line_gst": {
             "type": ["string", "null"],
-            "pattern": "^[0-9]+\\.[0-9]{2}$",
+            "pattern": "^[0-9]{1,12}\\.[0-9]{2}$",
             "description": "GST amount for this line if the invoice prints GST per line (a GST column), else null."
           }
         }
@@ -123,17 +124,17 @@
     },
     "subtotal": {
       "type": "string",
-      "pattern": "^[0-9]+\\.[0-9]{2}$",
+      "pattern": "^[0-9]{1,12}\\.[0-9]{2}$",
       "description": "Total ex GST as printed. Copy it; do not recalculate."
     },
     "gst": {
       "type": "string",
-      "pattern": "^[0-9]+\\.[0-9]{2}$",
+      "pattern": "^[0-9]{1,12}\\.[0-9]{2}$",
       "description": "Total GST as printed, even if it looks wrong. 0.00 if the invoice prints zero GST."
     },
     "total": {
       "type": "string",
-      "pattern": "^[0-9]+\\.[0-9]{2}$",
+      "pattern": "^[0-9]{1,12}\\.[0-9]{2}$",
       "description": "Total payable including GST, as printed, even if it does not equal subtotal + GST."
     }
   }

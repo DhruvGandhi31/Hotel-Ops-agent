@@ -15,4 +15,9 @@ __pycache__/
 Thumbs.db
 
 # Generated data (deterministic; regenerate with data-gen/generate.py)
-data-gen/out/
+data-gen/out*/
+
+# Raw per-case eval output (the summary .md files are committed)
+evals/results/raw/
+evals/results/dev/raw/
+evals/results/*-mock.*

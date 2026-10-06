@@ -22,3 +22,21 @@ docker compose exec -T n8n n8n import:workflow --separate --input="$tmp"
 docker compose exec -T n8n rm -rf "$tmp"
 
 echo "import: ${#files[@]} workflow file(s) imported"
+
+# A workflow's "active" field in git decides whether it is live. import:workflow leaves everything
+# unpublished, and --activeState=fromJson only exists for queue mode, so publish those explicitly.
+published=0
+for f in "${files[@]}"; do
+  if grep -q '^  "active": true' "$f"; then
+    id=$(grep -m1 '^  "id": "' "$f" | cut -d'"' -f4)
+    docker compose exec -T n8n n8n publish:workflow --id="$id"
+    published=$((published + 1))
+  fi
+done
+
+# The CLI cannot register webhooks in a running server, so restart n8n to pick them up.
+if [[ $published -gt 0 ]]; then
+  echo "import: published $published workflow(s), restarting n8n to register webhooks"
+  docker compose restart n8n >/dev/null
+  docker compose up -d --wait --wait-timeout 200 n8n >/dev/null
+fi
