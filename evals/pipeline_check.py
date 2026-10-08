@@ -81,11 +81,169 @@ def blank_pdf() -> bytes:
     return buf.getvalue()
 
 
+def reconciliation_checks(manifest: dict, exclude: set) -> None:
+    """Reconciliation behaviour, with the mock model. Needs the dataset's master data to be seeded."""
+    from hotel_evals.n8n_client import post_json
+
+    reconcile_url = WEBHOOK.rsplit("/", 1)[0] + "/reconcile"
+    by_id = {}
+    for f in manifest["files"]:
+        if f["expected_ingestion"] == "insert" and f["file_id"] not in exclude:  # already ingested above
+            by_id[f["file_id"]] = json.loads(
+                (DATA / "ground_truth" / f"{f['file_id']}.json").read_text(encoding="utf-8")
+            )
+
+    def aliased(skip: set) -> str:
+        return next(
+            fid
+            for fid, gt in by_id.items()
+            if fid not in skip
+            and not gt["labels"]["reason_codes"]
+            and any("description_mismatch" in ln["issues"] for ln in gt["labels"]["lines"])
+        )
+
+    plain = next(
+        fid for fid, gt in by_id.items() if not gt["labels"]["reason_codes"] and not gt["labels"]["conditions"]
+    )
+    used: set = set()
+    clear_cases = [aliased(used)]
+    used.add(clear_cases[0])
+    for _ in range(5):
+        clear_cases.append(aliased(used))
+        used.add(clear_cases[-1])
+    a1, a2, a3, a4, a5, a6 = clear_cases
+
+    print("reconciliation after ingest")
+    mode("oracle")
+    code, body = upload(pdf(plain), f"{plain}.pdf")
+    rec = body.get("reconciliation") or {}
+    check(
+        "a clean invoice is reconciled in the same response", rec.get("status") == "recommend_approve", str(rec)[:200]
+    )
+    check("without needing the matcher", (rec.get("matcher") or {}).get("status") == "not_needed")
+    check(
+        "and the result is stored once, with an audit row",
+        sql(f"SELECT count(*) FROM reconciliations WHERE invoice_id = {body.get('invoice_id')}") == "1"
+        and int(
+            sql(
+                f"SELECT count(*) FROM audit_log WHERE entity_id = '{body.get('invoice_id')}' "
+                "AND action = 'invoice.reconciled'"
+            )
+        )
+        >= 1,
+    )
+
+    print("reworded lines go to the matcher")
+    before = mock_stats().get("matcher_requests", 0)
+    code, body = upload(pdf(a1), f"{a1}.pdf")
+    rec = body.get("reconciliation") or {}
+    check(
+        "a reworded line is matched by the model and the invoice approves",
+        rec.get("status") == "recommend_approve",
+        str(rec)[:240],
+    )
+    check(
+        "one model call, reported as matched",
+        (rec.get("matcher") or {}).get("status") == "matched" and mock_stats()["matcher_requests"] == before + 1,
+    )
+    check(
+        "the line is recorded as matched by llm, with its confidence",
+        any(ln.get("match_method") == "llm" and ln.get("match_confidence") for ln in rec.get("lines", [])),
+    )
+
+    print("the matcher returns bad JSON once")
+    mode("garbage_once")
+    code, body = upload(pdf(a2), f"{a2}.pdf")
+    rec = body.get("reconciliation") or {}
+    check(
+        "the one retry rescues it",
+        (rec.get("matcher") or {}).get("attempts") == 2 and rec.get("status") == "recommend_approve",
+        str(rec)[:240],
+    )
+
+    print("the matcher returns bad JSON every time")
+    mode("matcher_garbage_always")
+    code, body = upload(pdf(a3), f"{a3}.pdf")
+    rec = body.get("reconciliation") or {}
+    check(
+        "the invoice is stored and goes to needs_review",
+        body.get("status") == "extracted" and rec.get("status") == "needs_review",
+        f"HTTP {code} {str(body)[:300]}",
+    )
+    check(
+        "the reason is the unmatched line, never a guess",
+        "unmatched_line" in rec.get("review_reasons", []) and (rec.get("matcher") or {}).get("status") == "failed",
+    )
+
+    print("the matcher is unsure, or says the line is not on the PO")
+    mode("matcher_unsure")
+    code, body = upload(pdf(a4), f"{a4}.pdf")
+    rec = body.get("reconciliation") or {}
+    check(
+        "low confidence is not trusted",
+        rec.get("status") == "needs_review" and "low_confidence_match" in rec.get("review_reasons", []),
+        str(rec)[:240],
+    )
+    mode("matcher_none")
+    code, body = upload(pdf(a5), f"{a5}.pdf")
+    rec = body.get("reconciliation") or {}
+    check(
+        "'not on the PO' leaves the line unmatched",
+        rec.get("status") == "needs_review" and "unmatched_line" in rec.get("review_reasons", []),
+        str(rec)[:240],
+    )
+
+    print("the matcher's model call fails after the invoice was stored")
+    mode("matcher_server_error")
+    code, body = upload(pdf(a6), f"{a6}.pdf")
+    rec = body.get("reconciliation") or {}
+    invoice_id = body.get("invoice_id")
+    check(
+        "the invoice is still ingested",
+        code == 200 and body.get("status") == "extracted" and invoice_id is not None,
+        f"HTTP {code} {str(body)[:200]}",
+    )
+    check(
+        "reconciliation reports itself pending, with the error",
+        rec.get("status") == "pending" and bool(rec.get("error")),
+        str(rec)[:200],
+    )
+    check(
+        "no result is stored for it yet",
+        sql(f"SELECT count(*) FROM reconciliations WHERE invoice_id = {invoice_id}") == "0",
+    )
+    mode("oracle")
+    code, again = post_json(reconcile_url, TOKEN, {"invoice_id": invoice_id})
+    check(
+        "running it again once the server is back completes it",
+        code == 200 and again.get("status") == "recommend_approve",
+        f"HTTP {code} {str(again)[:200]}",
+    )
+    check("and it is stored", sql(f"SELECT count(*) FROM reconciliations WHERE invoice_id = {invoice_id}") == "1")
+
+    print("the reconcile API")
+    code, first = post_json(reconcile_url, TOKEN, {"invoice_id": invoice_id})
+    code2, second = post_json(reconcile_url, TOKEN, {"invoice_id": invoice_id})
+    check(
+        "is idempotent: the same invoice gives the same result and one row",
+        first.get("status") == second.get("status")
+        and first.get("reason_codes") == second.get("reason_codes")
+        and sql(f"SELECT count(*) FROM reconciliations WHERE invoice_id = {invoice_id}") == "1",
+    )
+    check("rejects a body without an invoice id (400)", post_json(reconcile_url, TOKEN, {})[0] == 400)
+    check("rejects a non-integer id (400)", post_json(reconcile_url, TOKEN, {"invoice_id": "7"})[0] == 400)
+    check(
+        "answers 404 for an invoice that does not exist",
+        post_json(reconcile_url, TOKEN, {"invoice_id": 99999999})[0] == 404,
+    )
+    check("refuses a wrong token (403)", post_json(reconcile_url, "wrong", {"invoice_id": invoice_id})[0] == 403)
+
+
 def main() -> int:
     if not TOKEN:
         print("set INGEST_WEBHOOK_TOKEN (the X-Ingest-Token value from .env)", file=sys.stderr)
         return 2
-    sql("TRUNCATE invoice_lines, invoices, invoice_files RESTART IDENTITY")
+    sql("TRUNCATE reconciliation_lines, reconciliations, invoice_lines, invoices, invoice_files RESTART IDENTITY")
     mode("oracle")
     manifest = json.loads((DATA / "manifest.json").read_text(encoding="utf-8"))
     originals = [f["file_id"] for f in manifest["files"] if f["expected_ingestion"] == "insert"]
@@ -93,6 +251,7 @@ def main() -> int:
 
     print("happy path")
     audit_before = int(sql("SELECT count(*) FROM audit_log"))  # append-only: survives the reset above
+    ingested_before = int(sql("SELECT count(*) FROM audit_log WHERE action = 'invoice.ingested'"))
     code, body = upload(pdf(a), f"{a}.pdf")
     check("a new invoice is extracted", code == 200 and body.get("status") == "extracted", str(body)[:200])
     check("it was valid on the first attempt", body.get("attempts") == 1)
@@ -106,9 +265,9 @@ def main() -> int:
         int(sql(f"SELECT count(*) FROM invoice_lines WHERE invoice_id = {body.get('invoice_id')}")) >= 1,
     )
     check(
-        "and exactly one new audit row",
-        int(sql("SELECT count(*) FROM audit_log")) == audit_before + 1
-        and sql("SELECT action FROM audit_log ORDER BY id DESC LIMIT 1") == "invoice.ingested",
+        "and exactly one ingestion audit row, plus one for the reconciliation that follows it",
+        int(sql("SELECT count(*) FROM audit_log")) == audit_before + 2
+        and int(sql("SELECT count(*) FROM audit_log WHERE action = 'invoice.ingested'")) == ingested_before + 1,
     )
     first_id = body.get("invoice_id")
 
@@ -209,6 +368,8 @@ def main() -> int:
         compose("up", "-d", "--wait", "pdf-text")
     code, body = upload(pdf(e), f"{e}.pdf")
     check("once it is back the same file succeeds", body.get("status") == "extracted", str(body)[:200])
+
+    reconciliation_checks(manifest, set(originals[:5]))
 
     print("bad uploads")
     code, body = upload(pdf(e), "x.pdf", token="wrong")

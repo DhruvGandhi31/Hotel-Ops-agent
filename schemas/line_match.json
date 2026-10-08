@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hotel-ops-agent.local/schemas/line_match.json",
+  "title": "Line match",
+  "description": "What the LLM returns when asked which purchase order line each unmatched invoice line is. One entry per invoice line it was asked about. Checked in the 'Validate Matches' Code node (schema, then: every asked line answered exactly once, only listed PO lines chosen, no PO line used twice). Invalid output gets one retry, then the invoice goes to needs_review.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["matches"],
+  "properties": {
+    "matches": {
+      "type": "array",
+      "minItems": 1,
+      "description": "One entry for every invoice line listed in the request, in the order listed.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["invoice_line_no", "po_line_no", "confidence"],
+        "properties": {
+          "invoice_line_no": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The invoice line's number, exactly as listed in the request."
+          },
+          "po_line_no": {
+            "type": ["integer", "null"],
+            "minimum": 1,
+            "description": "The number of the purchase order line this invoice line is, chosen only from the PO lines listed. null if none of them is the same product."
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "0 to 1. 0.95 or more when the wording clearly describes the same product; 0.7 to 0.9 when probably the same; below 0.5 when unsure."
+          }
+        }
+      }
+    }
+  }
+}

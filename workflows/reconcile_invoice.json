@@ -1,0 +1,492 @@
+{
+  "id": "hoaReconcileInv01",
+  "name": "Reconcile Invoice",
+  "description": null,
+  "active": true,
+  "nodes": [
+    {
+      "id": "04af7390-7901-5ab2-947a-285a9fb34838",
+      "name": "When Called",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "parameters": {
+        "inputSource": "passthrough"
+      }
+    },
+    {
+      "id": "9e61f24c-20cf-5018-b280-6907bb809b87",
+      "name": "Get Candidates",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT reconcile_candidates($1::bigint) AS result",
+        "options": {
+          "queryReplacement": "={{ [$json.invoice_id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "hoaCredOpsPg0001",
+          "name": "Ops Postgres"
+        }
+      }
+    },
+    {
+      "id": "908d0c72-343f-5263-8760-d734dfe14b99",
+      "name": "Needs Matching?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "a6f6e479-a4ab-5259-a9a1-8ad061219c5a",
+              "leftValue": "={{ $json.result.pending_lines.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "e9a8500c-a958-5e7f-8ff9-a0a7978c1afd",
+      "name": "Build Match Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        160
+      ],
+      "parameters": {
+        "jsCode": "// Builds the line-matching prompt from the same files the evals read (prompts/, schemas/).\n// Mirrors evals/hotel_evals/match.py (build_match_system_prompt, match_user_message); a test runs\n// this code and compares the output with the Python.\nconst fs = require('fs');\nconst DIR = '/opt/hotel-ops';\nconst ANNOTATIONS = ['description', '$schema', '$id', 'title'];\n\n// Drop schema prose (the rules already say it) but keep structure; only string-valued annotation\n// keys go, so a property that is itself named \"description\" stays.\nconst strip = (node) => {\n  if (Array.isArray(node)) return node.map(strip);\n  if (node && typeof node === 'object') {\n    return Object.fromEntries(\n      Object.entries(node)\n        .filter(([k, v]) => !(ANNOTATIONS.includes(k) && typeof v === 'string'))\n        .map(([k, v]) => [k, strip(v)]),\n    );\n  }\n  return node;\n};\n\nconst ctx = $input.first().json.result; // reconcile_candidates(): {invoice_number, pending_lines, candidates}\nconst schema = JSON.parse(fs.readFileSync(`${DIR}/schemas/line_match.json`, 'utf8'));\nconst template = fs.readFileSync(`${DIR}/prompts/line_match.md`, 'utf8');\nif (!template.includes('{{SCHEMA}}')) throw new Error('prompt file lost its {{SCHEMA}} placeholder');\nconst system = template.replace('{{SCHEMA}}', () => JSON.stringify(strip(schema)));\n\nconst dollars = (c) => `${Math.trunc(c / 100)}.${String(c % 100).padStart(2, '0')}`;\nconst num = (v) => Number(v).toFixed(3).replace(/\\.?0+$/, '');\n\nconst lines = [`Invoice ${ctx.invoice_number}`, '', 'Invoice lines to match:'];\nfor (const l of ctx.pending_lines) {\n  lines.push(\n    `- line ${l.line_no}: \"${l.description}\", quantity ${num(l.quantity)}, unit ${l.unit || 'no unit printed'}, ` +\n      `unit price $${dollars(l.unit_price_cents)}, line total $${dollars(l.line_total_cents)}`,\n  );\n}\nlines.push('', 'Purchase order lines still unmatched (choose only among these):');\nfor (const c of ctx.candidates) {\n  lines.push(\n    `- PO line ${c.po_line_no}: SKU ${c.supplier_sku || 'none'}, \"${c.description}\", ` +\n      `unit ${c.unit}, ordered ${num(c.quantity)}, price $${dollars(c.unit_price_cents)}`,\n  );\n}\n\nreturn [{ json: { invoice_id: ctx.invoice_id, system, user: lines.join('\\n'), attempt: 1, context: ctx } }];\n"
+      }
+    },
+    {
+      "id": "5fe0e950-1266-5d94-9480-6c67a8faec40",
+      "name": "Match Lines",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.9,
+      "position": [
+        960,
+        160
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.user }}",
+        "messages": {
+          "messageValues": [
+            {
+              "type": "SystemMessagePromptTemplate",
+              "message": "={{ $json.system }}"
+            }
+          ]
+        },
+        "batching": {}
+      }
+    },
+    {
+      "id": "7a0a40f2-3f03-5377-8369-cb4a43567865",
+      "name": "Ollama Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOllama",
+      "typeVersion": 1,
+      "position": [
+        960,
+        380
+      ],
+      "parameters": {
+        "model": "qwen3.5:9b",
+        "options": {
+          "numCtx": 4096,
+          "numPredict": 2048,
+          "temperature": 0,
+          "format": "json",
+          "think": false
+        }
+      },
+      "credentials": {
+        "ollamaApi": {
+          "id": "hoaCredOllama001",
+          "name": "Ollama"
+        }
+      }
+    },
+    {
+      "id": "74097648-687f-59fe-acf0-d2765df1acc0",
+      "name": "Validate Matches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        160
+      ],
+      "parameters": {
+        "jsCode": "// CLAUDE.md principle 2 again, for the line matcher: the model's reply is validated before any of it is\n// used. Same interpreter as `Validate Extraction` (spliced in verbatim), against schemas/line_match.json,\n// then the checks a schema cannot express. Mirrors match_errors() in evals/hotel_evals/match.py.\nconst fs = require('fs');\nconst DIR = '/opt/hotel-ops';\n\n// >>> schema-interpreter (byte-identical in every validation node; evals/tests/test_workflow_code.py enforces it)\n// Annotations carry no constraint. `format` is one: dates are checked for real by the node itself.\nconst ANNOTATIONS = ['$schema', '$id', 'title', 'description', 'format'];\nconst CONSTRAINTS = [\n  'type', 'enum', 'pattern', 'minLength', 'minimum', 'exclusiveMinimum', 'maximum',\n  'minItems', 'items', 'required', 'properties', 'additionalProperties',\n];\nconst TYPES = ['string', 'number', 'integer', 'boolean', 'null', 'object', 'array'];\n\nconst jsonType = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);\nconst isType = (v, t) => (t === 'integer' ? typeof v === 'number' && Number.isInteger(v) : jsonType(v) === t);\n\nconst assertSupported = (node, path) => {\n  for (const [key, value] of Object.entries(node)) {\n    if (!ANNOTATIONS.includes(key) && !CONSTRAINTS.includes(key)) {\n      throw new Error(`schema keyword \"${key}\" at ${path || '(root)'} is not supported by this validator`);\n    }\n    if (key === 'properties') {\n      for (const [name, sub] of Object.entries(value)) assertSupported(sub, `${path}/${name}`);\n    } else if (key === 'items') {\n      assertSupported(value, `${path}/items`);\n    } else if (key === 'type') {\n      for (const t of [].concat(value)) {\n        if (!TYPES.includes(t)) throw new Error(`schema type \"${t}\" at ${path || '(root)'} is not supported by this validator`);\n      }\n    }\n  }\n};\n\nconst check = (node, value, path, errors) => {\n  const where = path || '(root)';\n  if (node.type !== undefined) {\n    const allowed = [].concat(node.type);\n    if (!allowed.some((t) => isType(value, t))) {\n      errors.push(`${where}: expected ${allowed.join(' or ')}, got ${jsonType(value)}`);\n      return;\n    }\n  }\n  if (node.enum !== undefined && !node.enum.includes(value)) {\n    errors.push(`${where}: ${JSON.stringify(value)} is not one of ${JSON.stringify(node.enum)}`);\n  }\n  if (typeof value === 'string') {\n    if (node.minLength !== undefined && [...value].length < node.minLength) {\n      errors.push(`${where}: shorter than ${node.minLength} characters`);\n    }\n    if (node.pattern !== undefined && !new RegExp(node.pattern, 'u').test(value)) {\n      errors.push(`${where}: ${JSON.stringify(value)} does not match ${node.pattern}`);\n    }\n  }\n  if (typeof value === 'number') {\n    if (node.minimum !== undefined && value < node.minimum) {\n      errors.push(`${where}: ${value} is less than the minimum ${node.minimum}`);\n    }\n    if (node.exclusiveMinimum !== undefined && !(value > node.exclusiveMinimum)) {\n      errors.push(`${where}: ${value} must be greater than ${node.exclusiveMinimum}`);\n    }\n    if (node.maximum !== undefined && value > node.maximum) {\n      errors.push(`${where}: ${value} is greater than the maximum ${node.maximum}`);\n    }\n  }\n  if (Array.isArray(value)) {\n    if (node.minItems !== undefined && value.length < node.minItems) {\n      errors.push(`${where}: fewer than ${node.minItems} items`);\n    }\n    if (node.items !== undefined) value.forEach((v, i) => check(node.items, v, `${path}/${i + 1}`, errors));\n  }\n  if (jsonType(value) === 'object') {\n    for (const key of node.required ?? []) {\n      if (!(key in value)) errors.push(`${where}: '${key}' is a required property`);\n    }\n    const props = node.properties ?? {};\n    if (node.additionalProperties === false) {\n      for (const key of Object.keys(value)) {\n        if (!(key in props)) errors.push(`${where}: unexpected property '${key}'`);\n      }\n    }\n    for (const [key, sub] of Object.entries(props)) {\n      if (key in value) check(sub, value[key], `${path}/${key}`, errors);\n    }\n  }\n};\n\n// All schema errors for `value`, as strings; throws if the schema uses something unsupported.\nconst validateAgainst = (schema, value) => {\n  assertSupported(schema, '');\n  const errors = [];\n  check(schema, value, '', errors);\n  return errors;\n};\n// <<< schema-interpreter\n\n// One validator run per attempt, so the run index is the attempt number.\nconst attempt = $runIndex + 1;\nconst ctx = $('Build Match Prompt').first().json.context;\n\n// Same hand-over shapes as the extraction validator: parsed fields, {text}, or {error}.\nconst reply = $input.first().json;\nconst isText = typeof reply.text === 'string' && Object.keys(reply).length === 1;\nconst modelError = reply.error !== undefined ? String(reply.error.message ?? reply.error) : undefined;\nconst raw = isText ? reply.text : modelError !== undefined ? '' : JSON.stringify(reply);\n\nconst schema = JSON.parse(fs.readFileSync(`${DIR}/schemas/line_match.json`, 'utf8'));\n\nconst errorsFor = (output) => {\n  const errors = validateAgainst(schema, output);\n  if (errors.length > 0) return errors.slice(0, 12);\n\n  const asked = ctx.pending_lines.map((l) => l.line_no);\n  const offered = new Set(ctx.candidates.map((c) => c.po_line_no));\n  const answered = output.matches.map((m) => m.invoice_line_no);\n  for (const n of asked) {\n    const times = answered.filter((a) => a === n).length;\n    if (times !== 1) errors.push(`invoice line ${n} must be answered exactly once, it was answered ${times} times`);\n  }\n  for (const n of [...new Set(answered)].filter((a) => !asked.includes(a)).sort((a, b) => a - b)) {\n    errors.push(`invoice line ${n} was not asked about`);\n  }\n  const used = new Map();\n  for (const m of output.matches) {\n    if (m.po_line_no === null) continue;\n    if (!offered.has(m.po_line_no)) {\n      errors.push(`PO line ${m.po_line_no} is not one of the lines offered`);\n    } else if (used.has(m.po_line_no)) {\n      errors.push(`PO line ${m.po_line_no} is used for invoice lines ${used.get(m.po_line_no)} and ${m.invoice_line_no}; use it once`);\n    } else {\n      used.set(m.po_line_no, m.invoice_line_no);\n    }\n  }\n  return errors;\n};\n\n// A parse failure is the model's fault (it gets the one retry); a failed call is infrastructure and\n// fails the execution: reconciliation then stays pending and can simply be run again.\nlet parsed;\nlet errors;\nif (modelError !== undefined) {\n  if (!/JSON/i.test(modelError)) throw new Error(`model server failure: ${modelError}`);\n  errors = [`output is not valid JSON (${modelError})`];\n} else {\n  try {\n    parsed = JSON.parse(raw);\n  } catch (e) {\n    errors = [`output is not valid JSON (${e.message})`];\n  }\n}\nif (errors === undefined) errors = errorsFor(parsed);\n\nif (errors.length === 0) {\n  return [{ json: { valid: true, attempt, matches: parsed.matches, raw, errors: [] } }];\n}\nreturn [{ json: { valid: false, attempt, errors, raw } }];\n"
+      }
+    },
+    {
+      "id": "ae8b4c61-7dd8-5ffe-8bbb-f95b3a328456",
+      "name": "Matches Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1440,
+        160
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "055fb128-7076-55d3-89c1-690d9adae715",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "18297ab4-c1cf-5708-b9dc-9abb414a9061",
+      "name": "Prepare Matched",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        60
+      ],
+      "parameters": {
+        "jsCode": "// The model matched the lines it was asked about, and the answer is valid.\nconst prompt = $('Build Match Prompt').first().json;\nconst verdict = $input.first().json; // Validate Matches\nreturn [\n  {\n    json: {\n      invoice_id: prompt.invoice_id,\n      matches: verdict.matches,\n      context: { execution_id: $execution.id, workflow_id: $workflow.id, workflow_name: $workflow.name },\n      matcher: { status: 'matched', attempts: verdict.attempt, lines: verdict.matches.length },\n    },\n  },\n];\n"
+      }
+    },
+    {
+      "id": "b1e9f36f-b229-545e-ac61-61a9d33c52bf",
+      "name": "Can Retry Match?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1680,
+        260
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "f8496eb7-d4e4-5710-8675-999f142ff3e0",
+              "leftValue": "={{ $json.attempt }}",
+              "rightValue": 2,
+              "operator": {
+                "type": "number",
+                "operation": "lt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "2e8dab1c-c499-57b7-b8f6-ea8aaeb1270e",
+      "name": "Build Match Retry Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        260
+      ],
+      "parameters": {
+        "jsCode": "// The one retry for the matcher: a single user message with the original request, the failed\n// answer and the numbered errors. Mirrors match_retry_message() in evals/hotel_evals/match.py.\nconst fs = require('fs');\n\nconst prompt = $('Build Match Prompt').first().json;\nconst failed = $input.first().json; // Validate Matches' verdict for the attempt that just failed\n\nlet user = fs.readFileSync('/opt/hotel-ops/prompts/line_match_retry.md', 'utf8');\nconst fill = [\n  ['{{CONTEXT}}', prompt.user],\n  ['{{PREVIOUS_OUTPUT}}', failed.raw],\n  ['{{ERRORS}}', failed.errors.map((e) => `- ${e}`).join('\\n')],\n];\nfor (const [key, value] of fill) user = user.split(key).join(value);\n\nreturn [{ json: { system: prompt.system, user, attempt: failed.attempt + 1 } }];\n"
+      }
+    },
+    {
+      "id": "40135bc6-c6fa-5607-a324-9e7d6a1badaa",
+      "name": "Prepare Failed Match",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        420
+      ],
+      "parameters": {
+        "jsCode": "// The model's answer was invalid twice. Reconcile without it: the lines it was asked about stay\n// unmatched, which ends in needs_review (never a silent guess).\nconst prompt = $('Build Match Prompt').first().json;\nconst verdict = $input.first().json; // Validate Matches, second failure\nreturn [\n  {\n    json: {\n      invoice_id: prompt.invoice_id,\n      matches: [],\n      context: { execution_id: $execution.id, workflow_id: $workflow.id, workflow_name: $workflow.name },\n      matcher: { status: 'failed', attempts: verdict.attempt, errors: verdict.errors },\n    },\n  },\n];\n"
+      }
+    },
+    {
+      "id": "a80384b3-085b-526b-8d30-8e87b10625b4",
+      "name": "Prepare Unneeded",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        440
+      ],
+      "parameters": {
+        "jsCode": "// Every line matched by SKU or description: no model call was needed.\nconst invoiceId = $('Get Candidates').first().json.result.invoice_id;\nreturn [\n  {\n    json: {\n      invoice_id: invoiceId,\n      matches: [],\n      context: { execution_id: $execution.id, workflow_id: $workflow.id, workflow_name: $workflow.name },\n      matcher: { status: 'not_needed' },\n    },\n  },\n];\n"
+      }
+    },
+    {
+      "id": "9673fd7e-efbf-5b28-b217-aecf54545d88",
+      "name": "Reconcile",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        2160,
+        300
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT reconcile_invoice($1::bigint, $2::jsonb, $3::jsonb) AS result",
+        "options": {
+          "queryReplacement": "={{ [$json.invoice_id, JSON.stringify($json.matches), JSON.stringify($json.context)] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "hoaCredOpsPg0001",
+          "name": "Ops Postgres"
+        }
+      }
+    },
+    {
+      "id": "be74e19f-c95e-5c8a-961c-e831b181a49b",
+      "name": "Build Reconcile Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2400,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// What the workflow returns: the reconciliation plus what the matcher did.\nconst result = $input.first().json.result;\nconst prepared = ['Prepare Matched', 'Prepare Failed Match', 'Prepare Unneeded']\n  .map((name) => $(name))\n  .find((node) => node.isExecuted);\nreturn [{ json: { ...result, matcher: prepared.first().json.matcher } }];\n"
+      }
+    }
+  ],
+  "connections": {
+    "When Called": {
+      "main": [
+        [
+          {
+            "node": "Get Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Candidates": {
+      "main": [
+        [
+          {
+            "node": "Needs Matching?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Matching?": {
+      "main": [
+        [
+          {
+            "node": "Build Match Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Unneeded",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Match Prompt": {
+      "main": [
+        [
+          {
+            "node": "Match Lines",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ollama Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Match Lines",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match Lines": {
+      "main": [
+        [
+          {
+            "node": "Validate Matches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Matches": {
+      "main": [
+        [
+          {
+            "node": "Matches Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Matches Valid?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Matched",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Can Retry Match?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Can Retry Match?": {
+      "main": [
+        [
+          {
+            "node": "Build Match Retry Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Failed Match",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Match Retry Prompt": {
+      "main": [
+        [
+          {
+            "node": "Match Lines",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Matched": {
+      "main": [
+        [
+          {
+            "node": "Reconcile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Failed Match": {
+      "main": [
+        [
+          {
+            "node": "Reconcile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Unneeded": {
+      "main": [
+        [
+          {
+            "node": "Reconcile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reconcile": {
+      "main": [
+        [
+          {
+            "node": "Build Reconcile Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "hoaErrorHandler01"
+  },
+  "meta": null,
+  "nodeGroups": [],
+  "tags": []
+}

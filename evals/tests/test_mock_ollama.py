@@ -89,7 +89,17 @@ def test_bad_mode_is_rejected(mock):
     with pytest.raises(urllib.error.HTTPError) as err:
         _post(mock, "/__mode", {"mode": "nonsense"})
     assert err.value.code == 400
-    assert set(MODES) == {"oracle", "garbage_once", "garbage_always", "server_error"}
+    assert set(MODES) >= {
+        "oracle",
+        "garbage_once",
+        "garbage_always",
+        "server_error",
+        "matcher_unsure",
+        "matcher_none",
+        "matcher_wrong",
+        "matcher_server_error",
+        "matcher_garbage_always",
+    }
 
 
 def test_server_error_mode_is_a_transport_failure_not_a_bad_answer(dataset, mock):
