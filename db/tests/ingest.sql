@@ -26,6 +26,7 @@ DO $$
 DECLARE
   sample jsonb := (SELECT e FROM t_sample);
   r jsonb; r2 jsonb; r3 jsonb; inv bigint; n int;
+  n0 int := (SELECT count(*) FROM audit_log WHERE action = 'invoice.needs_review');  -- audit_log is append-only: count the delta
   sha_a text := repeat('a', 64); sha_b text := repeat('b', 64); sha_c text := repeat('c', 64);
 BEGIN
   -- dollars_to_cents: exact, strict
@@ -112,8 +113,8 @@ BEGIN
          'reason', 'no extractable text layer'));
   ASSERT r ->> 'status' = 'needs_review' AND (SELECT attempts FROM invoice_files WHERE file_sha256 = repeat('6', 64)) = 0,
     'a file that never reached the model records zero attempts';
-  SELECT count(*) INTO n FROM audit_log WHERE action = 'invoice.needs_review';
-  ASSERT n = 2, 'one needs_review audit row per file';
+  SELECT count(*) - n0 INTO n FROM audit_log WHERE action = 'invoice.needs_review';
+  ASSERT n = 2, 'one needs_review audit row per file (' || n || ' new)';
 
   RAISE NOTICE 'ingest.sql: all assertions passed';
 END;

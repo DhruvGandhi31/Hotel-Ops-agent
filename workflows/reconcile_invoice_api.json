@@ -1,0 +1,360 @@
+{
+  "id": "hoaReconcileApi01",
+  "name": "Reconcile Invoice API",
+  "description": null,
+  "active": true,
+  "nodes": [
+    {
+      "id": "5bc7e462-85e5-5b8d-85e3-9b0c3985d68a",
+      "name": "Reconcile Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "e159731e-aa17-5a0d-bc73-ee05c6542355",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "reconcile",
+        "authentication": "headerAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "hoaCredIngestTk1",
+          "name": "Ingest Webhook Token"
+        }
+      }
+    },
+    {
+      "id": "cc25f4c4-e68d-5fd3-87bc-15b8dbb1aba5",
+      "name": "Read Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// The webhook body must be JSON with a positive integer invoice_id.\nconst body = $input.first().json.body ?? {};\nconst id = body.invoice_id;\nif (!Number.isInteger(id) || id < 1) {\n  return [{ json: { valid: false, status_code: 400, reason: 'JSON body {\"invoice_id\": <positive integer>} is required' } }];\n}\nreturn [{ json: { valid: true, invoice_id: id } }];\n"
+      }
+    },
+    {
+      "id": "1e1f0a08-6388-5067-866a-25b6629f3e28",
+      "name": "Request Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "055fb128-7076-55d3-89c1-690d9adae715",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "f5055aaa-8050-5d43-b3f7-f67a75525e6d",
+      "name": "Find Invoice",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        720,
+        200
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id FROM invoices WHERE id = $1::bigint",
+        "options": {
+          "queryReplacement": "={{ [$json.invoice_id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "hoaCredOpsPg0001",
+          "name": "Ops Postgres"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "id": "d8bbbef0-90a9-540d-868d-e7b5339b20c6",
+      "name": "Invoice Exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        960,
+        200
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "9031e8e5-0524-5bdf-9b68-2e3c8f6d349d",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "f91cc65d-289d-5da0-80fe-5ac0d4126148",
+      "name": "Prepare Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        100
+      ],
+      "parameters": {
+        "jsCode": "return [{ json: { invoice_id: $('Read Request').first().json.invoice_id } }];"
+      }
+    },
+    {
+      "id": "80c73dd1-51e5-5e93-a2da-ba9d50ab0702",
+      "name": "Reconcile Invoice",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        1440,
+        100
+      ],
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "hoaReconcileInv01",
+          "mode": "id"
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "a818fd4d-52c9-5920-9ba0-be23b5047fd4",
+      "name": "OK Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        100
+      ],
+      "parameters": {
+        "jsCode": "return [{ json: { status_code: 200, body: $input.first().json } }];\n"
+      }
+    },
+    {
+      "id": "78406f07-9683-5f1a-8845-5079036f4b02",
+      "name": "Not Found Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        300
+      ],
+      "parameters": {
+        "jsCode": "return [{ json: { status_code: 404, body: { status: 'rejected', reason: 'no such invoice' } } }];\n"
+      }
+    },
+    {
+      "id": "cea1c68e-87b6-561d-98b6-cd28ce8884b7",
+      "name": "Bad Request Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        440
+      ],
+      "parameters": {
+        "jsCode": "const bad = $input.first().json;\nreturn [{ json: { status_code: bad.status_code, body: { status: 'rejected', reason: bad.reason } } }];\n"
+      }
+    },
+    {
+      "id": "2555c970-aecf-55fe-94be-036b36039412",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1920,
+        300
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json.body }}",
+        "options": {
+          "responseCode": "={{ $json.status_code }}"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Reconcile Webhook": {
+      "main": [
+        [
+          {
+            "node": "Read Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Request": {
+      "main": [
+        [
+          {
+            "node": "Request Valid?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request Valid?": {
+      "main": [
+        [
+          {
+            "node": "Find Invoice",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Bad Request Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Invoice": {
+      "main": [
+        [
+          {
+            "node": "Invoice Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Invoice Exists?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Input",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Not Found Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Input": {
+      "main": [
+        [
+          {
+            "node": "Reconcile Invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reconcile Invoice": {
+      "main": [
+        [
+          {
+            "node": "OK Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OK Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Not Found Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bad Request Response": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "hoaErrorHandler01"
+  },
+  "meta": null,
+  "nodeGroups": [],
+  "tags": []
+}

@@ -115,6 +115,21 @@ jobs:
           bash scripts/reset-ingestion.sh
           curl -sf -X POST http://127.0.0.1:11500/__mode -d '{"mode":"oracle"}'
           python evals/run.py --suite extraction --target n8n --mock --limit 100 --out "$RUNNER_TEMP/eval"
+      - name: Reconciliation, rules only (ground-truth extraction and line matches, SQL only; must be perfect)
+        run: |
+          bash scripts/reset-ingestion.sh
+          python evals/run.py --suite reconciliation --expect-perfect --out "$RUNNER_TEMP/eval"
+      - name: Reconciliation through n8n, line matching by the mock model (pipeline test only)
+        run: |
+          set -a; . ./.env; set +a
+          bash scripts/reset-ingestion.sh
+          curl -sf -X POST http://127.0.0.1:11500/__mode -d '{"mode":"oracle"}'
+          python evals/run.py --suite reconciliation --source truth --matcher n8n --mock --expect-perfect --out "$RUNNER_TEMP/eval"
+      - name: Reconciliation end to end from the PDFs (mock model, pipeline test only)
+        run: |
+          set -a; . ./.env; set +a
+          bash scripts/reset-ingestion.sh
+          python evals/run.py --suite reconciliation --source pdf --mock --expect-perfect --out "$RUNNER_TEMP/eval"
       - name: Export round-trip leaves workflows/ unchanged
         run: |
           bash scripts/export.sh

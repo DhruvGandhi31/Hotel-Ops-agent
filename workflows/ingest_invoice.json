@@ -271,7 +271,7 @@
         160
       ],
       "parameters": {
-        "jsCode": "// CLAUDE.md principle 2: every LLM output is validated before it goes anywhere.\n//\n// Validates against schemas/invoice_extraction.json, the same file the eval reads, plus the\n// checks a schema cannot express. Mirrors validation_errors() in evals/hotel_evals/extract.py;\n// tests/test_workflow_code.py feeds both the same inputs and compares the verdicts.\n//\n// Why not ajv: the Code node sandbox forbids code generation (ajv builds validators with\n// `new Function`), so it cannot compile a schema here. This is a small interpreter instead. It\n// supports exactly the keywords our schemas use and THROWS on any other keyword, so a schema\n// change can never be silently ignored; it fails the workflow loudly instead.\nconst fs = require('fs');\n\nconst DIR = '/opt/hotel-ops';\nconst ABN_WEIGHTS = [10, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19];\n\n// Annotations carry no constraint. `format` is one: dates are checked for real below.\nconst ANNOTATIONS = ['$schema', '$id', 'title', 'description', 'format'];\nconst CONSTRAINTS = [\n  'type', 'enum', 'pattern', 'minLength', 'exclusiveMinimum', 'maximum',\n  'minItems', 'items', 'required', 'properties', 'additionalProperties',\n];\n\n// One validator run per attempt, so the run index is the attempt number.\nconst attempt = $runIndex + 1;\n\n// What the chain node hands over depends on the model's JSON mode: with `format: json` n8n parses\n// the reply itself and emits the fields directly; otherwise (or if it could not parse) it emits\n// {text}. A failed call arrives as {error} because the node is set to continue on error.\nconst reply = $input.first().json;\nconst isText = typeof reply.text === 'string' && Object.keys(reply).length === 1;\nconst modelError = reply.error !== undefined ? String(reply.error.message ?? reply.error) : undefined;\nconst raw = isText ? reply.text : modelError !== undefined ? '' : JSON.stringify(reply);\nconst schema = JSON.parse(fs.readFileSync(`${DIR}/schemas/invoice_extraction.json`, 'utf8'));\n\nconst jsonType = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);\n\nconst assertSupported = (node, path) => {\n  for (const [key, value] of Object.entries(node)) {\n    if (!ANNOTATIONS.includes(key) && !CONSTRAINTS.includes(key)) {\n      throw new Error(`schema keyword \"${key}\" at ${path || '(root)'} is not supported by this validator`);\n    }\n    if (key === 'properties') {\n      for (const [name, sub] of Object.entries(value)) assertSupported(sub, `${path}/${name}`);\n    } else if (key === 'items') {\n      assertSupported(value, `${path}/items`);\n    } else if (key === 'type') {\n      for (const t of [].concat(value)) {\n        if (!['string', 'number', 'boolean', 'null', 'object', 'array'].includes(t)) {\n          throw new Error(`schema type \"${t}\" at ${path || '(root)'} is not supported by this validator`);\n        }\n      }\n    }\n  }\n};\nassertSupported(schema, '');\n\nconst check = (node, value, path, errors) => {\n  const where = path || '(root)';\n  if (node.type !== undefined) {\n    const allowed = [].concat(node.type);\n    if (!allowed.includes(jsonType(value))) {\n      errors.push(`${where}: expected ${allowed.join(' or ')}, got ${jsonType(value)}`);\n      return;\n    }\n  }\n  if (node.enum !== undefined && !node.enum.includes(value)) {\n    errors.push(`${where}: ${JSON.stringify(value)} is not one of ${JSON.stringify(node.enum)}`);\n  }\n  if (typeof value === 'string') {\n    if (node.minLength !== undefined && [...value].length < node.minLength) {\n      errors.push(`${where}: shorter than ${node.minLength} characters`);\n    }\n    if (node.pattern !== undefined && !new RegExp(node.pattern, 'u').test(value)) {\n      errors.push(`${where}: ${JSON.stringify(value)} does not match ${node.pattern}`);\n    }\n  }\n  if (typeof value === 'number') {\n    if (node.exclusiveMinimum !== undefined && !(value > node.exclusiveMinimum)) {\n      errors.push(`${where}: ${value} must be greater than ${node.exclusiveMinimum}`);\n    }\n    if (node.maximum !== undefined && value > node.maximum) {\n      errors.push(`${where}: ${value} is greater than the maximum ${node.maximum}`);\n    }\n  }\n  if (Array.isArray(value)) {\n    if (node.minItems !== undefined && value.length < node.minItems) {\n      errors.push(`${where}: fewer than ${node.minItems} items`);\n    }\n    if (node.items !== undefined) value.forEach((v, i) => check(node.items, v, `${path}/${i + 1}`, errors));\n  }\n  if (jsonType(value) === 'object') {\n    for (const key of node.required ?? []) {\n      if (!(key in value)) errors.push(`${where}: '${key}' is a required property`);\n    }\n    const props = node.properties ?? {};\n    if (node.additionalProperties === false) {\n      for (const key of Object.keys(value)) {\n        if (!(key in props)) errors.push(`${where}: unexpected property '${key}'`);\n      }\n    }\n    for (const [key, sub] of Object.entries(props)) {\n      if (key in value) check(sub, value[key], `${path}/${key}`, errors);\n    }\n  }\n};\n\nconst isRealDate = (s) => {\n  const d = new Date(`${s}T00:00:00Z`);\n  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s && Number(s.slice(0, 4)) >= 1900;\n};\nconst abnOk = (abn) => {\n  const digits = String(abn).replace(/\\s+/g, '');\n  if (!/^\\d{11}$/.test(digits)) return false;\n  const nums = [...digits].map(Number);\n  nums[0] -= 1;\n  return nums.reduce((sum, d, i) => sum + d * ABN_WEIGHTS[i], 0) % 89 === 0;\n};\n\nconst errorsFor = (output) => {\n  const errors = [];\n  check(schema, output, '', errors);\n  if (errors.length > 0) return errors.slice(0, 12);\n\n  for (const key of ['invoice_date', 'due_date']) {\n    if (output[key] !== null && !isRealDate(output[key])) {\n      errors.push(`${key}: '${output[key]}' is not a real calendar date`);\n    }\n  }\n  output.lines.forEach((line, i) => {\n    if (Number(line.quantity.toFixed(3)) !== line.quantity) {\n      errors.push(`lines/${i + 1}/quantity: ${line.quantity} has more than 3 decimal places`);\n    }\n  });\n  if (!abnOk(output.supplier_abn)) {\n    errors.push(`supplier_abn: '${output.supplier_abn}' fails the ABN checksum; re-read it from the document`);\n  }\n  return errors;\n};\n\n// Only a parse failure is the model's fault; anything thrown by the validator itself is a bug\n// and must fail the execution, not be reported to the model as bad JSON.\nlet parsed;\nlet errors;\nif (modelError !== undefined) {\n  // The chain reports unparseable model output and a failed call the same way, by message. Bad JSON\n  // is the model's fault and gets the one retry. Anything else (server down, timeout, 5xx) is\n  // infrastructure: fail the execution so it is audited, the caller gets a 5xx, the file is NOT\n  // recorded, and uploading it again once the server is back works. Recording it as needs_review\n  // would make an outage permanent for every file that arrived during it.\n  if (!/JSON/i.test(modelError)) throw new Error(`model server failure: ${modelError}`);\n  errors = [`output is not valid JSON (${modelError})`];\n} else {\n  try {\n    parsed = JSON.parse(raw);\n  } catch (e) {\n    errors = [`output is not valid JSON (${e.message})`];\n  }\n}\nif (errors === undefined) errors = errorsFor(parsed);\n\nif (errors.length === 0) {\n  return [{ json: { valid: true, attempt, extraction: parsed, raw, errors: [] } }];\n}\nreturn [{ json: { valid: false, attempt, errors, raw } }];\n"
+        "jsCode": "// CLAUDE.md principle 2: every LLM output is validated before it goes anywhere.\n//\n// Validates against schemas/invoice_extraction.json, the same file the eval reads, plus the\n// checks a schema cannot express. Mirrors validation_errors() in evals/hotel_evals/extract.py;\n// tests/test_workflow_code.py feeds both the same inputs and compares the verdicts.\n//\n// Why not ajv: the Code node sandbox forbids code generation (ajv builds validators with\n// `new Function`), so it cannot compile a schema here. The interpreter below supports exactly the\n// keywords our schemas use and THROWS on any other keyword, so a schema change can never be\n// silently ignored; it fails the workflow loudly instead.\nconst fs = require('fs');\n\nconst DIR = '/opt/hotel-ops';\nconst ABN_WEIGHTS = [10, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19];\n\n// >>> schema-interpreter (byte-identical in every validation node; evals/tests/test_workflow_code.py enforces it)\n// Annotations carry no constraint. `format` is one: dates are checked for real by the node itself.\nconst ANNOTATIONS = ['$schema', '$id', 'title', 'description', 'format'];\nconst CONSTRAINTS = [\n  'type', 'enum', 'pattern', 'minLength', 'minimum', 'exclusiveMinimum', 'maximum',\n  'minItems', 'items', 'required', 'properties', 'additionalProperties',\n];\nconst TYPES = ['string', 'number', 'integer', 'boolean', 'null', 'object', 'array'];\n\nconst jsonType = (v) => (v === null ? 'null' : Array.isArray(v) ? 'array' : typeof v);\nconst isType = (v, t) => (t === 'integer' ? typeof v === 'number' && Number.isInteger(v) : jsonType(v) === t);\n\nconst assertSupported = (node, path) => {\n  for (const [key, value] of Object.entries(node)) {\n    if (!ANNOTATIONS.includes(key) && !CONSTRAINTS.includes(key)) {\n      throw new Error(`schema keyword \"${key}\" at ${path || '(root)'} is not supported by this validator`);\n    }\n    if (key === 'properties') {\n      for (const [name, sub] of Object.entries(value)) assertSupported(sub, `${path}/${name}`);\n    } else if (key === 'items') {\n      assertSupported(value, `${path}/items`);\n    } else if (key === 'type') {\n      for (const t of [].concat(value)) {\n        if (!TYPES.includes(t)) throw new Error(`schema type \"${t}\" at ${path || '(root)'} is not supported by this validator`);\n      }\n    }\n  }\n};\n\nconst check = (node, value, path, errors) => {\n  const where = path || '(root)';\n  if (node.type !== undefined) {\n    const allowed = [].concat(node.type);\n    if (!allowed.some((t) => isType(value, t))) {\n      errors.push(`${where}: expected ${allowed.join(' or ')}, got ${jsonType(value)}`);\n      return;\n    }\n  }\n  if (node.enum !== undefined && !node.enum.includes(value)) {\n    errors.push(`${where}: ${JSON.stringify(value)} is not one of ${JSON.stringify(node.enum)}`);\n  }\n  if (typeof value === 'string') {\n    if (node.minLength !== undefined && [...value].length < node.minLength) {\n      errors.push(`${where}: shorter than ${node.minLength} characters`);\n    }\n    if (node.pattern !== undefined && !new RegExp(node.pattern, 'u').test(value)) {\n      errors.push(`${where}: ${JSON.stringify(value)} does not match ${node.pattern}`);\n    }\n  }\n  if (typeof value === 'number') {\n    if (node.minimum !== undefined && value < node.minimum) {\n      errors.push(`${where}: ${value} is less than the minimum ${node.minimum}`);\n    }\n    if (node.exclusiveMinimum !== undefined && !(value > node.exclusiveMinimum)) {\n      errors.push(`${where}: ${value} must be greater than ${node.exclusiveMinimum}`);\n    }\n    if (node.maximum !== undefined && value > node.maximum) {\n      errors.push(`${where}: ${value} is greater than the maximum ${node.maximum}`);\n    }\n  }\n  if (Array.isArray(value)) {\n    if (node.minItems !== undefined && value.length < node.minItems) {\n      errors.push(`${where}: fewer than ${node.minItems} items`);\n    }\n    if (node.items !== undefined) value.forEach((v, i) => check(node.items, v, `${path}/${i + 1}`, errors));\n  }\n  if (jsonType(value) === 'object') {\n    for (const key of node.required ?? []) {\n      if (!(key in value)) errors.push(`${where}: '${key}' is a required property`);\n    }\n    const props = node.properties ?? {};\n    if (node.additionalProperties === false) {\n      for (const key of Object.keys(value)) {\n        if (!(key in props)) errors.push(`${where}: unexpected property '${key}'`);\n      }\n    }\n    for (const [key, sub] of Object.entries(props)) {\n      if (key in value) check(sub, value[key], `${path}/${key}`, errors);\n    }\n  }\n};\n\n// All schema errors for `value`, as strings; throws if the schema uses something unsupported.\nconst validateAgainst = (schema, value) => {\n  assertSupported(schema, '');\n  const errors = [];\n  check(schema, value, '', errors);\n  return errors;\n};\n// <<< schema-interpreter\n\n// One validator run per attempt, so the run index is the attempt number.\nconst attempt = $runIndex + 1;\n\n// What the chain node hands over depends on the model's JSON mode: with `format: json` n8n parses\n// the reply itself and emits the fields directly; otherwise (or if it could not parse) it emits\n// {text}. A failed call arrives as {error} because the node is set to continue on error.\nconst reply = $input.first().json;\nconst isText = typeof reply.text === 'string' && Object.keys(reply).length === 1;\nconst modelError = reply.error !== undefined ? String(reply.error.message ?? reply.error) : undefined;\nconst raw = isText ? reply.text : modelError !== undefined ? '' : JSON.stringify(reply);\n\nconst schema = JSON.parse(fs.readFileSync(`${DIR}/schemas/invoice_extraction.json`, 'utf8'));\n\nconst isRealDate = (s) => {\n  const d = new Date(`${s}T00:00:00Z`);\n  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s && Number(s.slice(0, 4)) >= 1900;\n};\nconst abnOk = (abn) => {\n  const digits = String(abn).replace(/\\s+/g, '');\n  if (!/^\\d{11}$/.test(digits)) return false;\n  const nums = [...digits].map(Number);\n  nums[0] -= 1;\n  return nums.reduce((sum, d, i) => sum + d * ABN_WEIGHTS[i], 0) % 89 === 0;\n};\n\nconst errorsFor = (output) => {\n  const errors = validateAgainst(schema, output);\n  if (errors.length > 0) return errors.slice(0, 12);\n\n  for (const key of ['invoice_date', 'due_date']) {\n    if (output[key] !== null && !isRealDate(output[key])) {\n      errors.push(`${key}: '${output[key]}' is not a real calendar date`);\n    }\n  }\n  output.lines.forEach((line, i) => {\n    if (Number(line.quantity.toFixed(3)) !== line.quantity) {\n      errors.push(`lines/${i + 1}/quantity: ${line.quantity} has more than 3 decimal places`);\n    }\n  });\n  if (!abnOk(output.supplier_abn)) {\n    errors.push(`supplier_abn: '${output.supplier_abn}' fails the ABN checksum; re-read it from the document`);\n  }\n  return errors;\n};\n\n// Only a parse failure is the model's fault; anything thrown by the validator itself is a bug\n// and must fail the execution, not be reported to the model as bad JSON.\nlet parsed;\nlet errors;\nif (modelError !== undefined) {\n  // The chain reports unparseable model output and a failed call the same way, by message. Bad JSON\n  // is the model's fault and gets the one retry. Anything else (server down, timeout, 5xx) is\n  // infrastructure: fail the execution so it is audited, the caller gets a 5xx, the file is NOT\n  // recorded, and uploading it again once the server is back works. Recording it as needs_review\n  // would make an outage permanent for every file that arrived during it.\n  if (!/JSON/i.test(modelError)) throw new Error(`model server failure: ${modelError}`);\n  errors = [`output is not valid JSON (${modelError})`];\n} else {\n  try {\n    parsed = JSON.parse(raw);\n  } catch (e) {\n    errors = [`output is not valid JSON (${e.message})`];\n  }\n}\nif (errors === undefined) errors = errorsFor(parsed);\n\nif (errors.length === 0) {\n  return [{ json: { valid: true, attempt, extraction: parsed, raw, errors: [] } }];\n}\nreturn [{ json: { valid: false, attempt, errors, raw } }];\n"
       }
     },
     {
@@ -345,16 +345,84 @@
       }
     },
     {
-      "id": "8a08c18b-52d6-5141-ad3b-e279e2b30f90",
-      "name": "Extracted Response",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
+      "id": "700a76c6-86fd-5483-9982-f53ba2653e5a",
+      "name": "Reconcile This Invoice?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
       "position": [
         3360,
         60
       ],
       "parameters": {
-        "jsCode": "const result = $input.first().json.result;\nconst ctx = $('Build Prompt').first().json;\nconst verdict = $('Validate Extraction').last().json;\nreturn [\n  {\n    json: {\n      status_code: 200,\n      body: {\n        ...result,\n        file_sha256: ctx.file_sha256,\n        attempts: verdict.attempt,\n        llm_model: $('Ollama Chat Model').params.model,\n        extraction: verdict.extraction,\n      },\n    },\n  },\n];\n"
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d1778a7d-1865-588f-8341-93c134f8d1f8",
+              "leftValue": "={{ $json.result.status }}",
+              "rightValue": "extracted",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "a45ba505-1842-5d7b-aab3-ad78ed769db0",
+      "name": "Prepare Reconcile Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3600,
+        -40
+      ],
+      "parameters": {
+        "jsCode": "// Hand the new invoice's id to the Reconcile Invoice workflow.\nreturn [{ json: { invoice_id: $input.first().json.result.invoice_id } }];\n"
+      }
+    },
+    {
+      "id": "2d1e841a-005c-57e2-9298-a6bbfac82d9c",
+      "name": "Reconcile After Ingest",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [
+        3840,
+        -40
+      ],
+      "onError": "continueRegularOutput",
+      "parameters": {
+        "workflowId": {
+          "__rl": true,
+          "value": "hoaReconcileInv01",
+          "mode": "id"
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      }
+    },
+    {
+      "id": "8a08c18b-52d6-5141-ad3b-e279e2b30f90",
+      "name": "Extracted Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4080,
+        60
+      ],
+      "parameters": {
+        "jsCode": "const result = $('Ingest Invoice Record').first().json.result;\nconst ctx = $('Build Prompt').first().json;\nconst verdict = $('Validate Extraction').last().json;\n\n// Reconciliation runs after a successful ingest, with continue-on-fail: a problem there (the model\n// server down, say) must never undo or hide an invoice that is stored. It reports itself as pending\n// and can be run again through POST /webhook/reconcile.\nlet reconciliation = null;\nif ($('Reconcile After Ingest').isExecuted) {\n  const out = $('Reconcile After Ingest').first().json;\n  reconciliation =\n    out.error !== undefined\n      ? { status: 'pending', error: String(out.error.message ?? out.error) }\n      : out;\n}\n\nreturn [\n  {\n    json: {\n      status_code: 200,\n      body: {\n        ...result,\n        file_sha256: ctx.file_sha256,\n        attempts: verdict.attempt,\n        llm_model: $('Ollama Chat Model').params.model,\n        extraction: verdict.extraction,\n        reconciliation,\n      },\n    },\n  },\n];\n"
       }
     },
     {
@@ -484,7 +552,7 @@
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.5,
       "position": [
-        3840,
+        4320,
         300
       ],
       "parameters": {
@@ -680,6 +748,46 @@
       ]
     },
     "Ingest Invoice Record": {
+      "main": [
+        [
+          {
+            "node": "Reconcile This Invoice?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reconcile This Invoice?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Reconcile Input",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extracted Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Reconcile Input": {
+      "main": [
+        [
+          {
+            "node": "Reconcile After Ingest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reconcile After Ingest": {
       "main": [
         [
           {

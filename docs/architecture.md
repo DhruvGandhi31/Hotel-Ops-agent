@@ -115,6 +115,10 @@ erDiagram
   invoice_files ||--o| invoices : "extracted into"
   invoices ||--|{ invoice_lines : "has"
   invoices |o--o{ invoices : "duplicate_of"
+  invoices ||--o| reconciliations : "decided by"
+  reconciliations ||--|{ reconciliation_lines : "per invoice line"
+  invoice_lines ||--o| reconciliation_lines : "matched to"
+  purchase_order_lines ||--o{ reconciliation_lines : "matched as"
 
   suppliers {
     text abn UK
@@ -128,6 +132,14 @@ erDiagram
   invoices {
     text invoice_key "generated, not unique"
   }
+  reconciliations {
+    text status "recommend_approve, flag, needs_review"
+    text_array reason_codes "discrepancies"
+    text_array review_reasons "cannot be sure"
+  }
+  reconciliation_lines {
+    text match_method "sku, description, llm, none"
+  }
 ```
 
 | Migration | Contents | Notes |
@@ -136,9 +148,10 @@ erDiagram
 | `002_procurement` | `suppliers`, `purchase_orders`, `purchase_order_lines`, `receipts`, `receipt_lines`, `seed_metadata` | master data; `seed_metadata` guards against loading a different dataset on top |
 | `003_invoices` | `invoice_files`, `invoices`, `invoice_lines`, `invoice_key_of()` | see below |
 | `004_ingest_functions` | `dollars_to_cents()`, `ingest_invoice()`, `record_needs_review()`, `invoice_file_status()` | the ingestion logic; fixes `unit` nullable and `attempts` 0 to 2 |
+| `005_column_comments` | comments only | says in the schema which extracted columns are unreliable |
+| `006_reconciliation` | `reconciliation_settings`, `reconciliations`, `reconciliation_lines`, `reconciliation_setting()`, `po_key()`, `description_key()`, `deterministic_line_matches()`, `reconcile_candidates()`, `reconcile_invoice()` | the reconciliation rules; see [Reconciliation (P3)](#reconciliation-p3) |
 
-Planned: `reconciliations` and per-line results (P3), approvals use `audit_log` (P4),
-`llm_calls` (P6). Database tests live in `db/tests/*.sql` (plain `ASSERT`s in a rolled-back
+Planned: approvals use `audit_log` (P4), `llm_calls` (P6). Database tests live in `db/tests/*.sql` (plain `ASSERT`s in a rolled-back
 transaction; run with `bash scripts/test-db.sh`).
 
 ### Idempotency and duplicates
@@ -251,6 +264,114 @@ decoding; the eval measured both and they gave identical output (see
 
 ---
 
+## Reconciliation (P3)
+
+Reconciliation decides, for each ingested invoice, one of three statuses. It is a **recommendation**:
+nothing is approved, paid or sent (principle 3), and a human sees every invoice in P4.
+
+| Status | Meaning |
+|---|---|
+| `flag` | at least one discrepancy a human can act on, with one or more **reason codes** |
+| `needs_review` | no discrepancy was found, but the system cannot be sure (for example a line it could not match); has **review reasons** |
+| `recommend_approve` | every check passed |
+
+A flagged invoice that also has review reasons stays `flag`; the review reasons are kept alongside.
+
+### Rules (all deterministic, in SQL)
+
+Everything below is plain SQL in migration `006_reconciliation.sql`
+(`reconcile_invoice(invoice_id, matches, context)`), tested by `db/tests/reconcile.sql`. The function is
+a pure function of the invoice, the master data and the supplied line matches, so it is idempotent: it
+replaces the invoice's result row and writes one audit row per run. The tolerances are rows in
+`reconciliation_settings`, not constants in code; a result stores the settings it was judged with.
+
+| Reason code (`flag`) | Rule |
+|---|---|
+| `unknown_po` | the invoice names a PO number that does not exist (compared after stripping punctuation and case, so `PO-004512` equals `PO004512`) |
+| `missing_po` | the invoice carries no PO number |
+| `duplicate_invoice` | the invoice has the same `invoice_key` as an earlier one (`duplicate_of` is set at ingestion); a copy is judged as its original was, so it is flagged for being a duplicate and nothing else |
+| `price_variance` | an invoiced unit price is more than 2% **above** the PO price. Undercharges are not flagged. Boundary tested: 5100 cents against a 5000 PO price is accepted, 5101 is flagged |
+| `short_delivery` | the quantity invoiced on a PO line, **cumulatively** across earlier non-duplicate invoices, exceeds the quantity received |
+| `gst_miscalculated` | stated GST differs from 10% of the taxable subtotal by more than ceil(taxable lines x 0.5) cents. "Taxable" is decided from the **PO line's** GST status; the invoice's own markers are used only for a line with no PO line (basis `invoice`), because the model reads those markers with about 90% accuracy |
+
+| Review reason (`needs_review`) | Meaning |
+|---|---|
+| `unmatched_line` | a line matched no PO line (including when the matcher failed or said "not on the PO") |
+| `low_confidence_match` | the model proposed a match below the confidence threshold (0.85) |
+| `supplier_unknown`, `po_supplier_mismatch` | the supplier is not in the master data, or the PO belongs to another supplier |
+| `line_arithmetic`, `totals_arithmetic` | quantity x price differs from a line total, or the lines do not sum to the stated subtotal |
+| `quantity_exceeds_po` | more was invoiced than was ordered |
+| `no_receiving_record` | there is a PO but nothing was received against it |
+
+The unclear cases go to `needs_review` rather than `flag` because a flag is a claim ("this is wrong");
+these are "a person should look". The synthetic data never produces them, so they are tested in SQL
+but are not part of the gate numbers.
+
+### Matching invoice lines to PO lines
+
+Three tiers, cheapest first. A line takes the first tier that matches; each PO line is used at most once.
+
+1. the printed **supplier SKU** equals the PO line's SKU;
+2. the **normalised description** (lower case, letters and digits only) equals the PO line's;
+3. only if both fail, the **model** is asked (about 5% of lines in the synthetic data, all of them the
+   deliberately reworded ones).
+
+The model is called **once per invoice**, for all of that invoice's unmatched lines at once, through the
+`Reconcile Invoice` workflow. It sees the unmatched invoice lines and only the PO lines still unmatched,
+and for each invoice line returns a PO line or `null` and a confidence. The reply is validated against
+[`schemas/line_match.json`](../schemas/line_match.json) and then checked for what a schema cannot
+express (every asked line answered exactly once, only offered PO lines chosen, each PO line used once);
+on failure it is retried once with the errors appended, and after that the invoice goes to `needs_review`.
+A confidence below `line_match_min_confidence` (0.85) is discarded. Prompts:
+[prompts.md](prompts.md).
+
+### The workflows
+
+```mermaid
+flowchart LR
+  I["Ingest Invoice<br/>(upload webhook)"] -->|"after the invoice is stored<br/>continue-on-fail"| R
+  A["Reconcile Invoice API<br/>POST /webhook/reconcile"] --> R
+  subgraph R["Reconcile Invoice (sub-workflow)"]
+    C["reconcile_candidates()"] --> N{"lines need<br/>the model?"}
+    N -->|no| X["reconcile_invoice()"]
+    N -->|yes| P["Build Match Prompt"] --> M["Match Lines<br/>(Ollama)"] --> V["Validate Matches"]
+    V -->|valid| X
+    V -->|"invalid, first time"| RP["Build Match Retry Prompt"] --> M
+    V -->|"invalid twice"| X
+  end
+  X --> DB[("reconciliations<br/>reconciliation_lines<br/>audit_log")]
+```
+
+`Ingest Invoice` calls reconciliation after the invoice is stored and reports the result in its
+response. That call is **continue-on-fail**: if it breaks (for example the model server is down while
+matching), the stored invoice is never undone or hidden; the response says `reconciliation: pending`
+with the error, and `POST /webhook/reconcile {"invoice_id": N}` completes it later. A bad request
+returns 400, a missing invoice 404, a wrong token 403.
+
+Invoices must be reconciled in ingest order for the cumulative quantity rule to be complete; the
+ingestion hand-off does this naturally.
+
+### Evaluating reconciliation
+
+`python evals/run.py --suite reconciliation` scores the `flag` class (precision and recall) and each
+reason code against the labels, and checks the conditions that must **not** flag (reworded lines,
+partial deliveries, price within tolerance). Three modes, because they answer different questions:
+
+| Mode | Extraction | Line matching | Question it answers | Where it runs |
+|---|---|---|---|---|
+| rules only (`--source truth --matcher oracle`) | ground truth | ground truth | are the rules implemented as specified? | CI, SQL only |
+| matcher (`--source truth --matcher n8n`) | ground truth | the model, through n8n | how good is the model at the one job it has here? | by hand (real model) |
+| end to end (`--source pdf`) | the model, from the PDFs | the model | **the number that counts** | by hand (real model) |
+
+**Caveat, stated in every report:** the generator that injects the discrepancies and the reconciler
+encode the same rules (the 2% tolerance, the half-cent GST allowance), so a near-perfect rules-only
+score shows the implementation matches the specification, not that the rules suit a real hotel. The
+honest signal is the gap between the modes: what extraction and matching errors cost on top of the
+rules. With the mock model all three modes run in CI as pipeline tests and must be perfect; those
+reports are stamped as mock and are never accuracy results.
+
+---
+
 ## Evaluation
 
 [`evals/`](../evals/README.md) scores extraction against the ground truth `data-gen` writes next
@@ -296,7 +417,7 @@ GitHub Actions on every push and pull request (`.github/workflows/ci.yml`):
 | Workflow JSON checks | valid JSON, no non-empty `pinData`, credential references carry only id and name |
 | Secret scan | gitleaks (pinned image, `.gitleaks.toml` allowlists one public test vector) over full history |
 | ruff + pytest | lint, format, and the data-gen and evals tests on Python 3.12, including the workflow's JS under Node |
-| Stack and ingestion pipeline | stack boots (including building the `pdf-text` image); migrations apply and re-run as a no-op; Postgres `invoice_key_of()` matches Python; `db/tests` pass; seed loads twice identically; credentials, import and publish work and are idempotent; the pipeline behaviour checks pass against the mock model; 100 invoices ingest through the webhook with every duplicate and re-send handled correctly; export round-trips byte for byte |
+| Stack, ingestion and reconciliation pipeline | stack boots (including building the `pdf-text` image); migrations apply and re-run as a no-op; Postgres `invoice_key_of()` matches Python; `db/tests` pass; seed loads twice identically; credentials, import and publish work and are idempotent; the pipeline behaviour checks pass against the mock model; 100 invoices ingest through the webhook with every duplicate and re-send handled correctly; the reconciliation eval runs in all three modes against the mock and must be perfect; export round-trips byte for byte |
 
 Evals that call a real model are never run in CI; they are run by hand.
 
@@ -311,6 +432,20 @@ Evals that call a real model are never run in CI; they are run by hand.
   Anthropic comparison is out of P2 scope.
 - **One dataset for the gate.** One seed and 196 scored invoices: a 98% target allows 3
   misses, so reports include 95% confidence intervals.
+- **Reconciliation labels share the reconciler's rules** (see above), and the data never produces
+  unknown suppliers, arithmetic errors or quantities above the PO, so those paths are tested in SQL
+  only.
+- **The reconciler trusts what extraction gives it.** In the P3 gate run, the model shifted the printed item
+  codes up one row on one invoice layout and the SKU tier matched lines to the wrong PO lines with
+  confidence, falsely flagging a clean invoice; per-line GST markers misread on invoices without a PO
+  produced two false `gst_miscalculated` flags. Item code and GST marker were not scored in the P2
+  extraction gate. See `docs/p3-engineering-log.md` 2.6 for the proposed checks.
+- **A label the reconciler cannot meet.** A GST error that exists only against the PO's GST status, on an
+  invoice with no PO number, cannot be seen from the page (one invoice in seed 44).
+- **A confident wrong line match cannot be detected at run time.** Only the eval's matcher accuracy
+  measures it.
+- **Cumulative quantity depends on order.** An invoice reconciled before an earlier one exists would
+  not count it; re-running `/reconcile` for the later invoice fixes the result.
 - **Token and cost visibility.** Not available through the workflow yet; `ops.llm_calls`
   arrives in P6.
 - **Notifications.** The Error Handler records to `audit_log` only; the notification half

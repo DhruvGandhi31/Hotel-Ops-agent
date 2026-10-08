@@ -8,7 +8,8 @@ questions, answered by separate tools:
 | Question | Tool | Needs |
 |---|---|---|
 | How accurate is the extraction? | `run.py` | a real model (GPU), run by hand |
-| Does the pipeline behave correctly (retry, `needs_review`, outage, duplicates, idempotency)? | `pipeline_check.py`, `run.py --mock` | no GPU: a mock model |
+| Does the pipeline behave correctly (retry, `needs_review`, outage, duplicates, idempotency, reconciliation)? | `pipeline_check.py`, `run.py --mock` | no GPU: a mock model |
+| How good are the reconciliation decisions (`flag` precision and recall per discrepancy type)? | `run.py --suite reconciliation` | rules only: nothing; the other two modes: a real model |
 
 ## Running it
 
@@ -81,6 +82,52 @@ gate target applies to recall. Per-field line accuracy (unit, supplier code, GST
 GST) is positional and only counted when the invoice has the right number of lines.
 
 A `needs_review` file, or one the workflow failed on, scores every field wrong.
+
+## Reconciliation suite (P3)
+
+Scores the reconciler's decision for each invoice against the labels in the ground truth: the status
+(`recommend_approve`, `flag`, `needs_review`) and the reason codes. The P3 gate numbers are precision
+and recall for the `flag` class, overall and per discrepancy type, with 95% confidence intervals.
+Conditions that must **not** flag (reworded lines, partial deliveries, price within tolerance) are
+reported separately as false positives.
+
+```bash
+# 1. rules only: ground-truth extraction and ground-truth line matches, SQL only, no model, seconds
+bash scripts/reset-ingestion.sh
+python evals/run.py --suite reconciliation --expect-perfect
+
+# 2. matcher: ground-truth extraction, the real model matches the reworded lines (through n8n)
+bash scripts/reset-ingestion.sh
+python evals/run.py --suite reconciliation --source truth --matcher n8n
+
+# 3. end to end: the PDFs through the ingestion webhook, which reconciles (THE NUMBER THAT COUNTS)
+bash scripts/reset-ingestion.sh
+python evals/run.py --suite reconciliation --source pdf --data data-gen/out-gate3
+```
+
+Modes 2 and 3 need `INGEST_WEBHOOK_TOKEN` in the environment (`set -a; . ./.env; set +a`). The ops
+database must hold the master data of the dataset being scored and no invoices (the quantity rule is
+cumulative per PO, so leftovers would change the answer); the suite refuses to run otherwise and prints
+the commands to fix it (`bash scripts/reset-ops-data.sh && bash scripts/seed.sh <dataset>/seed.sql`).
+
+| Flag | Meaning |
+|---|---|
+| `--source` | `truth` (ground-truth extraction written straight to the database) or `pdf` (the PDFs through the webhook) |
+| `--matcher` | with `--source truth`: `oracle` (the true line matches, rules only) or `n8n` (the real model) |
+| `--reconcile-webhook` | URL of `/webhook/reconcile` (mode 2; default `$RECONCILE_WEBHOOK`, else `http://127.0.0.1:5678/webhook/reconcile`) |
+| `--expect-perfect` | exit 1 unless every invoice is exactly right (used in CI, with the mock) |
+| `--mock` | the model behind n8n is the mock: the report is stamped and written to a `-mock` file |
+
+**What a score means.** The generator that injects the discrepancies and the reconciler encode the same
+rules, so the rules-only score is expected to be perfect and proves implementation, not suitability.
+The meaningful comparison is between modes: the difference between mode 1 and mode 2 is what the model's
+line matching costs; between mode 2 and mode 3, what extraction costs. Every report says this at the top.
+The same dev/gate discipline as extraction applies: thresholds are tuned on a dev dataset, and the final
+number is taken once on a dataset that was never examined.
+
+Data the synthetic set never produces (unknown supplier, a PO belonging to another supplier, arithmetic
+errors on a line or the totals, quantity above the PO, no receiving record) is covered by
+`db/tests/reconcile.sql`, not by this suite.
 
 ## Ingestion behaviour (target `n8n`)
 

@@ -12,6 +12,14 @@ Failure modes, switched at run time with POST /__mode {"mode": "..."} (GET /__st
     garbage_once    invalid JSON for the first attempt, valid on the retry
     garbage_always  invalid every time (the invoice must end up needs_review)
     server_error    HTTP 500 for every request (an outage: nothing may be recorded)
+    matcher_unsure  answers line-match prompts with confidence 0.5 (below the 0.85 threshold)
+    matcher_none    answers line-match prompts with "not on the PO" (po_line_no null)
+    matcher_wrong   answers line-match prompts with a PO line that is not the right one
+    matcher_garbage_always  invalid for line-match prompts only (extraction still works)
+    matcher_server_error  HTTP 500 for line-match prompts only (extraction still works)
+
+It answers two kinds of prompt: invoice extraction (the perfect extraction) and line matching (the
+true PO line for every line it is asked about, from the ground-truth labels).
 """
 
 import argparse
@@ -25,17 +33,27 @@ from hotel_datagen.abn import format_abn
 
 from .oracle import truth_to_extraction
 
-MODES = ("oracle", "garbage_once", "garbage_always", "server_error")
+MODES = (
+    "oracle",
+    "garbage_once",
+    "garbage_always",
+    "server_error",
+    "matcher_unsure",
+    "matcher_none",
+    "matcher_wrong",
+    "matcher_server_error",
+    "matcher_garbage_always",
+)
+MATCHER_MARKER = "You match lines on a supplier invoice"
 RETRY_MARKER = "Your previous answer was:"
 GARBAGE = '{"supplier_name": "Not an invoice", "total": 12'
 
 
 class MockState:
     def __init__(self, data_dir: Path):
-        self.docs = [
-            json.loads(p.read_text(encoding="utf-8"))["document"]
-            for p in sorted((data_dir / "ground_truth").glob("*.json"))
-        ]
+        truths = [json.loads(p.read_text(encoding="utf-8")) for p in sorted((data_dir / "ground_truth").glob("*.json"))]
+        self.docs = [t["document"] for t in truths]
+        self.labels = [t["labels"] for t in truths]
         self.mode = "oracle"
         self.lock = threading.Lock()
         self.stats = {"requests": 0, "retries": 0, "unmatched": 0, "formats": {}}
@@ -47,7 +65,37 @@ class MockState:
                 return doc
         return None
 
-    def reply(self, user_text: str, fmt) -> str:
+    def match_reply(self, user_text: str, mode: str) -> str:
+        """Answer a line-matching prompt from the ground-truth labels."""
+        number = re.match(r"Invoice (.+)", user_text).group(1).strip()
+        asked = [(int(n), d) for n, d in re.findall(r'^- line (\d+): "(.*?)", quantity', user_text, re.M)]
+        offered = [int(n) for n in re.findall(r"^- PO line (\d+):", user_text, re.M)]
+        labels = None
+        for doc, lab in zip(self.docs, self.labels, strict=True):
+            lines = {ln["line_no"]: ln["description"] for ln in doc["lines"]}
+            if doc["invoice_number"] == number and all(lines.get(n) == d for n, d in asked):
+                labels = lab
+                break
+        if labels is None:
+            with self.lock:
+                self.stats["unmatched"] += 1
+            return GARBAGE
+        truth = {ln["line_no"]: ln["po_line_no"] for ln in labels["lines"]}
+        matches = []
+        for n, _ in asked:
+            po = truth.get(n)
+            if mode == "matcher_none":
+                matches.append({"invoice_line_no": n, "po_line_no": None, "confidence": 0.9})
+            elif mode == "matcher_wrong":
+                wrong = next((c for c in offered if c != po), None)
+                matches.append({"invoice_line_no": n, "po_line_no": wrong, "confidence": 0.95})
+            else:
+                matches.append(
+                    {"invoice_line_no": n, "po_line_no": po, "confidence": 0.5 if mode == "matcher_unsure" else 0.95}
+                )
+        return json.dumps({"matches": matches})
+
+    def reply(self, user_text: str, fmt, system_text: str = "") -> str:
         with self.lock:
             self.stats["requests"] += 1
             key = json.dumps(fmt) if not isinstance(fmt, str) else fmt
@@ -55,8 +103,16 @@ class MockState:
             is_retry = RETRY_MARKER in user_text
             self.stats["retries"] += is_retry
             mode = self.mode
-        if mode == "garbage_always" or (mode == "garbage_once" and not is_retry):
+        if (
+            mode == "garbage_always"
+            or (mode == "garbage_once" and not is_retry)
+            or (mode == "matcher_garbage_always" and MATCHER_MARKER in system_text)
+        ):
             return GARBAGE
+        if MATCHER_MARKER in system_text:
+            with self.lock:
+                self.stats["matcher_requests"] = self.stats.get("matcher_requests", 0) + 1
+            return self.match_reply(user_text, mode)
         doc = self.find(user_text)
         if doc is None:
             with self.lock:
@@ -102,11 +158,15 @@ def make_handler(state: MockState):
                 return self._send(404, b"{}")
 
             user = next((m["content"] for m in reversed(body.get("messages", [])) if m["role"] == "user"), "")
-            if state.mode == "server_error":
+            matching = MATCHER_MARKER in next(
+                (m["content"] for m in body.get("messages", []) if m["role"] == "system"), ""
+            )
+            if state.mode == "server_error" or (state.mode == "matcher_server_error" and matching):
                 with state.lock:
                     state.stats["requests"] += 1
                 return self._send(500, b'{"error": "mock server error"}')
-            content = state.reply(user, body.get("format"))
+            system = next((m["content"] for m in body.get("messages", []) if m["role"] == "system"), "")
+            content = state.reply(user, body.get("format"), system)
             model = body.get("model", "mock")
             done = {
                 "model": model,

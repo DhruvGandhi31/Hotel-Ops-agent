@@ -240,11 +240,32 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--overwrite", action="store_true", help="allow replacing an existing report or raw output (refused by default)"
     )
+    ap.add_argument(
+        "--source",
+        choices=["truth", "pdf"],
+        default="truth",
+        help="reconciliation: ground-truth extraction or the PDFs",
+    )
+    ap.add_argument(
+        "--matcher", choices=["oracle", "n8n"], default="oracle", help="reconciliation: who matches reworded lines"
+    )
+    ap.add_argument(
+        "--reconcile-webhook",
+        default=os.environ.get("RECONCILE_WEBHOOK", "http://127.0.0.1:5678/webhook/reconcile"),
+        help="reconciliation webhook URL (suite reconciliation, --matcher n8n)",
+    )
+    ap.add_argument(
+        "--expect-perfect", action="store_true", help="reconciliation: exit 1 unless every invoice is exactly right"
+    )
     args = ap.parse_args(argv)
 
     if args.suite == "reconciliation":
-        print("reconciliation suite arrives with P3", file=sys.stderr)
-        return 2
+        if not (args.data / "manifest.json").exists():
+            print(f"{args.data / 'manifest.json'} not found; run: python data-gen/generate.py", file=sys.stderr)
+            return 2
+        from hotel_evals.reconcile_eval import run_suite
+
+        return run_suite(args, ROOT)
     if args.target == "ollama" and not args.model:
         print("--model is required for --target ollama", file=sys.stderr)
         return 2

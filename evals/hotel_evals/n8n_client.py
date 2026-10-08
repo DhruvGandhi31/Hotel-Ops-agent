@@ -51,3 +51,22 @@ def upload_invoice(
             raise TransportError(f"n8n webhook unreachable after {len(backoff) + 1} attempts: {last!r}") from last
         time.sleep(wait)
     raise AssertionError("unreachable")
+
+
+def post_json(url: str, token: str, body: dict, timeout: float = 600) -> tuple[int, dict]:
+    """POST JSON to a webhook. Like upload_invoice: HTTP errors are returned, only an unreachable server raises."""
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(
+        url, data=data, headers={"Content-Type": "application/json", "X-Ingest-Token": token}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, json.load(resp)
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        try:
+            return exc.code, json.loads(raw)
+        except json.JSONDecodeError:
+            return exc.code, {"message": raw[:300].decode("utf-8", "replace")}
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, ConnectionError, OSError) as exc:
+        raise TransportError(f"n8n webhook unreachable: {exc!r}") from exc
