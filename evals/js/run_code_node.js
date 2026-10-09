@@ -8,7 +8,7 @@
 // result:  [ { output: [...items] } | { error: "message" } ]   one entry per case
 //
 // It mimics the parts of the n8n Code node these workflows use: $input.first(), $('Node') with
-// .first()/.last()/.params, $runIndex, $execution, $workflow, this.helpers.getBinaryDataBuffer, and a
+// .first()/.last()/.params/.isExecuted, $runIndex, $execution, $workflow, this.helpers.getBinaryDataBuffer, and a
 // `require` limited to fs and crypto (as in docker-compose.yml). Paths under /opt/hotel-ops are
 // mapped to the repo, where the container mounts prompts/ and schemas/.
 const fs = require('fs');
@@ -48,6 +48,10 @@ const results = [];
       last: () => items(name).at(-1),
       get params() {
         return (c.nodes ?? {})[name]?.params ?? {};
+      },
+      // true when the case supplies this node's output, i.e. the node "ran"
+      get isExecuted() {
+        return (c.nodes ?? {})[name] !== undefined;
       },
     });
     const $input = { first: () => ({ json: c.input ?? {}, binary: c.binary }) };

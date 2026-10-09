@@ -101,11 +101,16 @@ jobs:
           files=$(printf '%s\n' workflows/*.json | wc -l)
           echo "imported=$imported files=$files"
           [ "$imported" -eq "$files" ]
+      - name: Create the n8n owner account (the approver identity on the Approval Form)
+        run: |
+          bash scripts/setup-owner.sh | tee owner.txt
+          grep -q "created the owner account" owner.txt
+          bash scripts/setup-owner.sh | grep -q "already exists"
       - name: Start the mock model
         run: |
           python evals/mock_ollama.py --data data-gen/out --port 11500 > mock.log 2>&1 &
           for _ in $(seq 1 30); do curl -sf http://127.0.0.1:11500/api/version && break; sleep 1; done
-      - name: Pipeline behaviour (retry, needs_review, outage, bad uploads, idempotency)
+      - name: Pipeline behaviour (retry, needs_review, outage, bad uploads, idempotency, reconciliation, approvals)
         run: |
           set -a; . ./.env; set +a
           python evals/pipeline_check.py

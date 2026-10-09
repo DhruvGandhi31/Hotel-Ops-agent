@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -36,6 +37,28 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 def sql(query: str) -> str:
     out = subprocess.run(
         ["docker", "compose", "exec", "-T", "postgres", "sh", "-c", 'psql -X -tA -U "${OPS_DB_USER:-postgres}" -d ops'],
+        input=query,
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        check=True,
+    )
+    return out.stdout.strip()
+
+
+def n8n_sql(query: str) -> str:
+    """Run SQL in n8n's own database (its executions), as the Postgres superuser."""
+    out = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "exec",
+            "-T",
+            "postgres",
+            "sh",
+            "-c",
+            'psql -X -tA -U "${POSTGRES_USER:-postgres}" -d n8n',
+        ],
         input=query,
         capture_output=True,
         text=True,
@@ -81,7 +104,7 @@ def blank_pdf() -> bytes:
     return buf.getvalue()
 
 
-def reconciliation_checks(manifest: dict, exclude: set) -> None:
+def reconciliation_checks(manifest: dict, exclude: set) -> set:
     """Reconciliation behaviour, with the mock model. Needs the dataset's master data to be seeded."""
     from hotel_evals.n8n_client import post_json
 
@@ -237,13 +260,307 @@ def reconciliation_checks(manifest: dict, exclude: set) -> None:
         post_json(reconcile_url, TOKEN, {"invoice_id": 99999999})[0] == 404,
     )
     check("refuses a wrong token (403)", post_json(reconcile_url, "wrong", {"invoice_id": invoice_id})[0] == 403)
+    return {plain, *clear_cases}
+
+
+def approval_checks(manifest: dict, exclude: set) -> None:
+    """Human approval: the request after reconciliation, the form, the rules, the audit trail. Mock model."""
+    from urllib.parse import urlsplit
+
+    from hotel_evals.approval_client import APPROVAL_FORM_ID, ApprovalClient, FormClient, FormError, probe
+    from hotel_evals.n8n_client import post_json
+
+    email = os.environ.get("N8N_OWNER_EMAIL", "")
+    password = os.environ.get("N8N_OWNER_PASSWORD", "")
+    if not email or not password:
+        check("N8N_OWNER_EMAIL and N8N_OWNER_PASSWORD are set (run scripts/setup-owner.sh)", False)
+        return
+    # The form must be reached at the very address n8n is configured with (N8N_WEBHOOK_URL): its sign-in
+    # redirects are built from that setting, and cookies belong to one host name.
+    parts = urlsplit(WEBHOOK)
+    base = os.environ.get("N8N_WEBHOOK_URL", "").rstrip("/") or f"{parts.scheme}://{parts.netloc}"
+    reconcile_url = WEBHOOK.rsplit("/", 1)[0] + "/reconcile"
+
+    truth = {}
+    for f in manifest["files"]:
+        if f["expected_ingestion"] == "insert" and f["file_id"] not in exclude:
+            truth[f["file_id"]] = json.loads(
+                (DATA / "ground_truth" / f"{f['file_id']}.json").read_text(encoding="utf-8")
+            )
+
+    def pick(predicate, taken):
+        return next(fid for fid, gt in truth.items() if fid not in taken and predicate(gt["labels"]))
+
+    taken: set = set()
+    clean_a = pick(lambda lab: not lab["reason_codes"] and not lab["conditions"], taken)
+    taken.add(clean_a)
+    clean_b = pick(lambda lab: not lab["reason_codes"] and not lab["conditions"], taken)
+    taken.add(clean_b)
+    flagged = pick(lambda lab: lab["reason_codes"] == ["price_variance"], taken)
+    taken.add(flagged)
+    doubtful = pick(lambda lab: not lab["reason_codes"] and "description_mismatch" in lab["conditions"], taken)
+    taken.add(doubtful)
+    hostile = pick(lambda lab: not lab["reason_codes"] and not lab["conditions"], taken)
+
+    def number_of(fid):
+        return truth[fid]["document"]["invoice_number"]
+
+    def ingest(fid):
+        code, body = upload(pdf(fid), f"{fid}.pdf")
+        rec = body.get("reconciliation") or {}
+        return code, body, rec, (rec.get("approval") or {})
+
+    def row(approval_id):
+        out = sql(
+            "SELECT status, recommended_status, coalesce(decided_by, ''), coalesce(decided_by_user_id, ''), "
+            f"coalesce(comment, '') FROM approvals WHERE id = {int(approval_id)}"
+        )
+        return out.split("|") if out else None
+
+    def audit(invoice_id, action):
+        return int(sql(f"SELECT count(*) FROM invoice_audit_trail({int(invoice_id)}) WHERE action = '{action}'"))
+
+    started = n8n_sql("SELECT now()")  # runs of the Approval Form that start after this are ours
+    print("approval requests")
+    mode("oracle")
+    code, body, rec, ap_clean = ingest(clean_a)
+    check(
+        "a reconciled invoice gets a pending approval in the same response",
+        ap_clean.get("result") == "created" and ap_clean.get("approval_status") == "pending",
+        str(ap_clean)[:200],
+    )
+    check(
+        "a clean invoice's approval records the recommendation",
+        ap_clean.get("recommended_status") == "recommend_approve",
+    )
+    id_clean = ap_clean.get("approval_id")
+    inv_clean = body.get("invoice_id")
+    check("the request is audited with the workflow as actor", audit(inv_clean, "approval.requested") == 1)
+    code, again = upload(pdf(clean_a), f"{clean_a}.pdf")
+    check(
+        "uploading the same file again creates nothing (a no-op)",
+        again.get("status") == "noop" and sql(f"SELECT count(*) FROM approvals WHERE invoice_id = {inv_clean}") == "1",
+    )
+
+    code, body, rec, ap_flag = ingest(flagged)
+    id_flag, inv_flag = ap_flag.get("approval_id"), body.get("invoice_id")
+    check(
+        "a flagged invoice's approval carries its reason codes",
+        ap_flag.get("recommended_status") == "flag"
+        and sql(f"SELECT reason_codes FROM approvals WHERE id = {id_flag}") == "{price_variance}",
+        str(ap_flag)[:200],
+    )
+
+    mode("matcher_none")  # the model says the reworded line is not on the PO: a doubt, not a discrepancy
+    code, body, rec, ap_doubt = ingest(doubtful)
+    mode("oracle")
+    id_doubt, inv_doubt = ap_doubt.get("approval_id"), body.get("invoice_id")
+    check(
+        "an invoice with a doubt gets a needs_review approval",
+        ap_doubt.get("recommended_status") == "needs_review",
+        str(ap_doubt)[:200],
+    )
+
+    code, body, rec, ap_clean_b = ingest(clean_b)
+    id_clean_b = ap_clean_b.get("approval_id")
+    code, body, rec, ap_hostile = ingest(hostile)
+    id_hostile, inv_hostile = ap_hostile.get("approval_id"), body.get("invoice_id")
+
+    print("the form: signing in")
+    try:
+        status, location = probe(f"{base}/form/{APPROVAL_FORM_ID}")
+    except FormError as exc:
+        status, location = 0, str(exc)
+    check(
+        "the form is not shown to someone who is not signed in: n8n redirects to its sign-in",
+        status == 302 and "/oauth/authorize" in location,
+        f"HTTP {status} {location[:120]}",
+    )
+    try:
+        FormClient(base).login(email, "definitely-not-the-password", attempts=1)
+        wrong_ok = True
+    except FormError:
+        wrong_ok = False
+    check("a wrong password does not sign in", not wrong_ok)
+
+    me = ApprovalClient(base, email, password)
+
+    print("the form: the pending list and the decision page")
+    listing = me.pending_page()
+    check(
+        "the pending list shows the waiting invoices",
+        all(number_of(f) in listing for f in (clean_a, flagged, doubtful)),
+    )
+    check(
+        "most urgent first: flagged, then needs review, then recommended",
+        listing.index(number_of(flagged)) < listing.index(number_of(doubtful)) < listing.index(number_of(clean_a)),
+    )
+    check(
+        "each row links to its approval", f"approval_id={id_flag}" in listing and f"approval_id={id_clean}" in listing
+    )
+    page = me.decision_page(id_flag)
+    check("the decision page names the signed-in approver", f"deciding as <b>{email}</b>" in page, "")
+    check("and shows the reason code and the line", "price_variance" in page and "price above PO" in page)
+    check(
+        "and requires a reason for a flagged invoice (the field is required on the page)",
+        "form-required" in page.split("Comment")[1][:400] or "required" in page.split("Comment")[-1][:600].lower(),
+    )
+    unknown = me.decide(99999999, "Approve", "x")
+    check("an unknown approval says so and records nothing", "no approval number 99999999" in unknown, unknown[:200])
+    bad_link = me.decide("abc", "Approve", "x")
+    check("a malformed link says so", "not valid" in bad_link or "Invalid link" in bad_link, bad_link[:200])
+
+    print("the form: deciding")
+    result = me.decide(id_clean, "Approve", "")
+    check("a clean invoice can be approved without a reason", "Recorded: approved" in result, result[:240])
+    r = row(id_clean)
+    check(
+        "the decision is stored with the approver's identity",
+        r is not None and r[0] == "approved" and r[2] == email and r[3] != "",
+        str(r),
+    )
+    check(
+        "and audited, with the approver as actor",
+        audit(inv_clean, "approval.decided") == 1
+        and sql(f"SELECT actor FROM invoice_audit_trail({inv_clean}) WHERE action = 'approval.decided'") == email,
+    )
+    second = me.decide(id_clean, "Reject", "changed my mind")
+    check(
+        "a second decision is refused and names the first",
+        "already approved" in second.lower() and email in second,
+        second[:240],
+    )
+    check(
+        "the first decision stands and nothing more is audited",
+        (row(id_clean) or [""])[0] == "approved" and audit(inv_clean, "approval.decided") == 1,
+    )
+    reopened = me.decide(id_clean, "Reject", "x")
+    check("an approval that is decided shows no decision form", "Already approved" in reopened, reopened[:200])
+
+    no_reason = me.decide(id_flag, "Approve", "")
+    check("approving a flagged invoice without a reason is refused", "reason is required" in no_reason, no_reason[:240])
+    r = row(id_flag)
+    check(
+        "and nothing was recorded or audited",
+        r is not None and r[0] == "pending" and audit(inv_flag, "approval.decided") == 0,
+        str(r),
+    )
+    ok = me.decide(id_flag, "Approve", "Supplier agreed the surcharge by phone.")
+    check("with a reason it is recorded", "Recorded: approved" in ok, ok[:240])
+    check(
+        "and the reason is stored",
+        (row(id_flag) or ["", "", "", "", ""])[4] == "Supplier agreed the surcharge by phone.",
+    )
+
+    rej = me.decide(id_doubt, "Reject", "No such item on the order.")
+    r = row(id_doubt)
+    check(
+        "a doubtful invoice can be rejected with a reason",
+        "Recorded: rejected" in rej and r is not None and r[0] == "rejected",
+        rej[:240],
+    )
+    rej2 = me.decide(id_clean_b, "Reject", "")
+    r = row(id_clean_b)
+    check(
+        "rejecting any invoice without a reason is refused",
+        "reason is required" in rej2 and r is not None and r[0] == "pending",
+        rej2[:240],
+    )
+
+    print("the form: hostile text")
+    evil = '<script>alert(1)</script> & "x"'
+    me.decide(id_hostile, "Approve", evil)
+    raw = me.decision_page(id_hostile)
+    check("a comment is stored exactly as typed", (row(id_hostile) or ["", "", "", "", ""])[4] == evil)
+    check(
+        "and shown as text, never as markup",
+        "<script>alert(1)" not in raw and "&lt;script&gt;alert(1)&lt;/script&gt;" in raw,
+    )
+    left = me.pending_page()
+    check(
+        "decided approvals leave the pending list",
+        number_of(clean_a) not in left and number_of(flagged) not in left and number_of(clean_b) in left,
+    )
+
+    print("re-running reconciliation")
+    code, again = post_json(reconcile_url, TOKEN, {"invoice_id": inv_clean})
+    ap = again.get("approval") or {}
+    check(
+        "re-reconciling a decided invoice leaves its decision alone",
+        ap.get("result") == "decided" and ap.get("approval_status") == "approved" and ap.get("stale") is False,
+        str(ap)[:200],
+    )
+    code, again = post_json(reconcile_url, TOKEN, {"invoice_id": body.get("invoice_id")})
+    check(
+        "it is still one approval per invoice",
+        sql("SELECT count(*) FROM approvals") == sql("SELECT count(DISTINCT invoice_id) FROM approvals"),
+    )
+
+    print("requesting the approval fails after the invoice is stored")
+    sql("ALTER FUNCTION request_approval(bigint, jsonb) RENAME TO request_approval_off")
+    try:
+        victim = pick(lambda lab: not lab["reason_codes"] and not lab["conditions"], taken | {hostile, clean_b})
+        code, body2, rec2, ap2 = ingest(victim)
+        check(
+            "the invoice is still ingested and reconciled",
+            code == 200 and body2.get("status") == "extracted" and rec2.get("status") == "recommend_approve",
+            f"HTTP {code} {str(rec2)[:200]}",
+        )
+        check(
+            "the response says the approval is pending, with the error",
+            ap2.get("result") == "pending" and bool(ap2.get("error")),
+            str(ap2)[:200],
+        )
+        inv_victim = body2.get("invoice_id")
+        check("no approval exists yet", sql(f"SELECT count(*) FROM approvals WHERE invoice_id = {inv_victim}") == "0")
+    finally:
+        sql("ALTER FUNCTION request_approval_off(bigint, jsonb) RENAME TO request_approval")
+    code, fixed = post_json(reconcile_url, TOKEN, {"invoice_id": inv_victim})
+    check(
+        "running the reconciliation again creates it",
+        (fixed.get("approval") or {}).get("result") == "created",
+        str(fixed.get("approval"))[:200],
+    )
+
+    print("no session is left running")
+    left = "?"
+    for _ in range(15):  # the last completion pages finish asynchronously
+        left = n8n_sql(
+            "SELECT count(*) FROM execution_entity WHERE \"workflowId\" = 'hoaApprovalForm01' "
+            f"AND status = 'waiting' AND \"startedAt\" >= '{started}'"
+        )
+        if left == "0":
+            break
+        time.sleep(1)
+    check(
+        "every form session ended: none of the runs started by these checks is still waiting",
+        left == "0",
+        f"{left} waiting",
+    )
+
+    print("the audit trail of one invoice")
+    trail = sql(f"SELECT string_agg(action, ',' ORDER BY audit_id) FROM invoice_audit_trail({inv_clean})")
+    check(
+        "reads ingest, reconcile, request, decision in order, then the deliberate re-run (and no approval row)",
+        trail == "invoice.ingested,invoice.reconciled,approval.requested,approval.decided,invoice.reconciled",
+        trail,
+    )
+    inv_unused = sql(f"SELECT string_agg(action, ',' ORDER BY audit_id) FROM invoice_audit_trail({inv_hostile})")
+    check(
+        "and every approval has its request audited",
+        all(audit(i, "approval.requested") >= 1 for i in (inv_clean, inv_flag, inv_doubt, inv_hostile)),
+        inv_unused,
+    )
 
 
 def main() -> int:
     if not TOKEN:
         print("set INGEST_WEBHOOK_TOKEN (the X-Ingest-Token value from .env)", file=sys.stderr)
         return 2
-    sql("TRUNCATE reconciliation_lines, reconciliations, invoice_lines, invoices, invoice_files RESTART IDENTITY")
+    sql(
+        "TRUNCATE approvals, reconciliation_lines, reconciliations, invoice_lines, invoices, "
+        "invoice_files RESTART IDENTITY"
+    )
     mode("oracle")
     manifest = json.loads((DATA / "manifest.json").read_text(encoding="utf-8"))
     originals = [f["file_id"] for f in manifest["files"] if f["expected_ingestion"] == "insert"]
@@ -265,8 +582,8 @@ def main() -> int:
         int(sql(f"SELECT count(*) FROM invoice_lines WHERE invoice_id = {body.get('invoice_id')}")) >= 1,
     )
     check(
-        "and exactly one ingestion audit row, plus one for the reconciliation that follows it",
-        int(sql("SELECT count(*) FROM audit_log")) == audit_before + 2
+        "and exactly one ingestion audit row, then one each for the reconciliation and the approval request",
+        int(sql("SELECT count(*) FROM audit_log")) == audit_before + 3
         and int(sql("SELECT count(*) FROM audit_log WHERE action = 'invoice.ingested'")) == ingested_before + 1,
     )
     first_id = body.get("invoice_id")
@@ -369,7 +686,8 @@ def main() -> int:
     code, body = upload(pdf(e), f"{e}.pdf")
     check("once it is back the same file succeeds", body.get("status") == "extracted", str(body)[:200])
 
-    reconciliation_checks(manifest, set(originals[:5]))
+    used = reconciliation_checks(manifest, set(originals[:5]))
+    approval_checks(manifest, set(originals[:5]) | used)
 
     print("bad uploads")
     code, body = upload(pdf(e), "x.pdf", token="wrong")
