@@ -11,7 +11,7 @@ export MSYS_NO_PATHCONV=1
 cd "$(dirname "$0")/.."
 
 docker compose exec -T postgres sh -c 'psql -X -q -v ON_ERROR_STOP=1 -U "$OPS_DB_USER" -d ops -c "
-  TRUNCATE reconciliation_lines, reconciliations, invoice_lines, invoices, invoice_files,
+  TRUNCATE approvals, reconciliation_lines, reconciliations, invoice_lines, invoices, invoice_files,
            receipt_lines, receipts, purchase_order_lines, purchase_orders, suppliers, seed_metadata
   RESTART IDENTITY"'
 echo "reset-ops-data: application data cleared (audit_log and settings kept)"

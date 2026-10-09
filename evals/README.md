@@ -180,7 +180,7 @@ time. It says **nothing** about model accuracy, so reports made with it are stam
 ```bash
 python evals/mock_ollama.py --data data-gen/out --port 11500 &
 OLLAMA_BASE_URL=http://host.docker.internal:11500 bash scripts/setup-credentials.sh
-python evals/pipeline_check.py                              # behaviour checks (resets ingestion)
+python evals/pipeline_check.py                              # behaviour checks (resets ingestion); needs the owner account (scripts/setup-owner.sh)
 python evals/run.py --suite extraction --target n8n --mock --limit 100 --out /tmp/eval
 bash scripts/setup-credentials.sh                           # point n8n back at the real Ollama
 ```
@@ -190,7 +190,33 @@ upload is a no-op that never calls the model; one bad reply is rescued by the re
 replies end in `needs_review` and are not silently retried; **a model-server outage returns a
 5xx, records nothing, is audited, and the same file succeeds once the server is back**; a PDF
 with no text layer goes to `needs_review` without a model call; a wrong token, non-PDF and
-missing file are refused and recorded nowhere. CI runs all of this.
+missing file are refused and recorded nowhere. It also covers reconciliation (matching by SKU, by description
+and by the model; every way the model's answer can fail; the `/reconcile` API) and **human approval**: the
+request that follows reconciliation, the Approval Form driven by a scripted client (sign-in required, the
+pending list in order, approve and reject, a reason required where the rules say so, a second decision refused,
+hostile text shown as text), re-running reconciliation on a decided invoice, the request failing after the
+invoice is stored, the audit trail in order, and that no form session is left running. CI runs all of this.
+
+## The approval client and the demo (P4)
+
+`hotel_evals/approval_client.py` is a scripted browser for the Approval Form: it signs in with the owner
+account, accepts n8n's one-time consent step, reads the page's token and submits like the page does. It has to
+work around three things a browser hides (n8n's `Secure` cookies, the login rate limit, a request for the next
+page that can hang before a retry succeeds) and must finish completion pages the way a browser does, or every
+session leaves a run waiting forever; all are explained in
+[`docs/p4-engineering-log.md`](../docs/p4-engineering-log.md#2-the-form-spike).
+
+`demo.py` is the P4 gate demonstration: it uploads a dataset invoice, prints the reconciliation and the approval
+request, lets you decide in the browser (or decides through the form with `--decide approve|reject --comment`)
+and prints the invoice's audit trail. With the mock model it is a dry run of the plumbing, not a statement
+about accuracy.
+
+```bash
+set -a; . ./.env; set +a
+python evals/demo.py                       # you decide in the browser
+python evals/demo.py --decide reject --comment "Not what we ordered."
+python evals/demo.py --kind clean          # a clean invoice instead of a flagged one
+```
 
 ## How extraction runs
 
@@ -218,18 +244,22 @@ latency to a transcription task); the n8n Ollama node uses `temperature 0` and `
 evals/
   run.py                  eval CLI (targets: n8n, ollama)
   pipeline_check.py       pipeline behaviour checks against a live stack + mock model
+  demo.py                 the P4 gate demo: invoice -> reconciliation -> approval -> audit trail
   mock_ollama.py          entry point for the mock model
   results/README.md       index of the gate runs and how they relate
   hotel_evals/
     extract.py            prompt build, validation, Ollama client, retry, transport errors
     scoring.py            field and line matching, aggregation
     ingestion.py          did ingestion do the right thing with each file
-    n8n_client.py         multipart upload to the webhook
+    n8n_client.py         multipart upload to the webhook, JSON posts
+    approval_client.py    scripted browser for the Approval Form (sign-in, consent, pages, decisions)
+    match.py              the line-matching prompt, validation and retry (Python reference)
+    reconcile_*.py, ops_db.py   the reconciliation eval: scoring, modes, report, database access
     mock_ollama.py        the mock model
     report.py             markdown report, Wilson intervals
     oracle.py             ground truth rendered as a perfect extraction
   js/run_code_node.js     runs a workflow Code node's JS under Node (for tests)
-  tests/                  scorer, extractor contract, workflow-code parity, mock, transport
+  tests/                  scorer, extractor contract, workflow-code parity (extraction, matching, approval pages), mock, transport
   results/                committed gate report (and dev/ reports)
 ```
 

@@ -1,0 +1,807 @@
+{
+  "id": "hoaApprovalForm01",
+  "name": "Approval Form",
+  "description": null,
+  "active": true,
+  "nodes": [
+    {
+      "id": "315eb597-9930-5885-ae3e-9b48b261d700",
+      "name": "Approvals Form",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.6,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "6f0a3c1e-7a52-4b6e-9d0f-2f4c1d5a8b01",
+      "parameters": {
+        "authentication": "n8nUserAuth",
+        "formTitle": "Invoice approvals",
+        "formDescription": "Review invoices waiting for a decision. Your n8n account is recorded as the approver.",
+        "formFields": {
+          "values": [
+            {
+              "fieldName": "approval_id",
+              "fieldLabel": "approval_id",
+              "fieldType": "hiddenField",
+              "fieldValue": ""
+            }
+          ]
+        },
+        "responseMode": "onReceived",
+        "options": {
+          "buttonLabel": "Continue",
+          "appendAttribution": false
+        }
+      }
+    },
+    {
+      "id": "cc25f4c4-e68d-5fd3-87bc-15b8dbb1aba5",
+      "name": "Read Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// What the Form Trigger gave us: the hidden approval_id (from the link) and the signed-in n8n user.\nconst j = $input.first().json;\nconst user = j.user ?? null;\nif (!user || !user.email) return [{ json: { kind: 'no_user' } }];\nconst raw = String(j.approval_id ?? '').trim();\nif (raw === '') return [{ json: { kind: 'list', user } }];\nif (!/^[1-9][0-9]{0,17}$/.test(raw)) return [{ json: { kind: 'bad_id', user } }];\nreturn [{ json: { kind: 'decide', approval_id: raw, user } }];\n"
+      }
+    },
+    {
+      "id": "5a40be6b-c506-562f-9c0e-740f5cc9e5bc",
+      "name": "Is List?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "9a95694f-c6f7-5ccb-a283-e18f91812df8",
+              "leftValue": "={{ $json.kind }}",
+              "rightValue": "list",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "05f1fd5c-895c-5a8d-87a3-9215f5b37e04",
+      "name": "Get Pending Approvals",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        720,
+        120
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT pending_approvals(100) AS result",
+        "options": {
+          "queryReplacement": ""
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "hoaCredOpsPg0001",
+          "name": "Ops Postgres"
+        }
+      }
+    },
+    {
+      "id": "91e26441-ccca-543c-a94d-6a8d7b5b950b",
+      "name": "Build List Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        120
+      ],
+      "parameters": {
+        "jsCode": "// >>> page-helpers\n// Shared by every approval page. Everything that came from the database or from a person is passed through\n// esc() before it goes into HTML, so a description like \"<script>\" is shown, never run.\nconst esc = (v) =>\n  String(v ?? '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;')\n    .replace(/\"/g, '&quot;')\n    .replace(/'/g, '&#39;');\nconst dollars = (cents) => {\n  if (cents === null || cents === undefined || cents === '') return '';\n  const n = Number(cents);\n  const abs = Math.abs(n);\n  const whole = String(Math.trunc(abs / 100)).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ',');\n  return (n < 0 ? '-' : '') + '$' + whole + '.' + String(abs % 100).padStart(2, '0');\n};\nconst qty = (v) => (v === null || v === undefined ? '' : String(Number(v)));\nconst when = (t) => {\n  const s = String(t ?? '');\n  const m = s.match(/^(\\d{4}-\\d{2}-\\d{2})T(\\d{2}:\\d{2})[^+\\-Z]*([+-]\\d{2}:\\d{2}|Z)?$/);\n  return m ? (m[1] + ' ' + m[2] + ' ' + (m[3] ?? '')).trim() : s;\n};\nconst REASON_TEXT = {\n  price_variance: 'A price on the invoice is more than the allowed tolerance above the purchase order price.',\n  short_delivery: 'More was invoiced than has been received against the purchase order.',\n  duplicate_invoice: 'The same invoice (supplier, number and total) has been received before.',\n  unknown_po: 'The purchase order number on the invoice does not exist.',\n  missing_po: 'The invoice carries no purchase order number.',\n  gst_miscalculated: 'The GST on the invoice does not match the GST rate applied to the taxable amount.',\n  unmatched_line: 'An invoice line could not be matched to a purchase order line.',\n  low_confidence_match: 'An invoice line was matched to a purchase order line with low confidence.',\n  supplier_unknown: 'The supplier is not in the supplier list.',\n  po_supplier_mismatch: 'The purchase order belongs to a different supplier.',\n  line_arithmetic: 'A line total is not quantity times unit price.',\n  totals_arithmetic: 'The line totals do not add up to the invoice subtotal.',\n  quantity_exceeds_po: 'More was invoiced than was ordered.',\n  no_receiving_record: 'Nothing has been received against this purchase order.',\n};\nconst reasonText = (code) => REASON_TEXT[code] ?? code;\nconst VERDICT = { flag: 'FLAGGED', needs_review: 'NEEDS REVIEW', recommend_approve: 'Recommended for approval' };\nconst ISSUE_TEXT = {\n  price_variance: 'price above PO',\n  short_delivery: 'more than received',\n  quantity_exceeds_po: 'more than ordered',\n  unmatched_line: 'no PO line',\n  low_confidence_match: 'low-confidence match',\n  line_arithmetic: 'line total wrong',\n};\nconst FORM_PATH = '/form/6f0a3c1e-7a52-4b6e-9d0f-2f4c1d5a8b01';\n// <<< page-helpers\n// The pending-approvals page: one entry per approval, the most urgent first, each with a link to its form.\n// (A list, not a wide table: the form card is narrow and a table ran out of it.)\nconst pending = $input.first().json.result;\nconst entries = pending.items\n  .map((it) => {\n    const reasons = [...(it.reason_codes ?? []), ...(it.review_reasons ?? [])].map(esc).join(', ');\n    return (\n      '<li><b>' + esc(VERDICT[it.recommended_status] ?? it.recommended_status) + '</b>: invoice ' + esc(it.invoice_number) +\n      ' from ' + esc(it.supplier_name) + ', ' + esc(dollars(it.total_cents)) + '<br>' +\n      (reasons ? 'Reasons: ' + reasons + '<br>' : '') +\n      'Waiting since ' + esc(when(it.requested_at)) + ' &mdash; ' +\n      '<a href=\"' + FORM_PATH + '?approval_id=' + esc(it.approval_id) + '\">Review and decide</a></li>'\n    );\n  })\n  .join('');\nconst summary =\n  pending.total === 0\n    ? '<p>Nothing is waiting for approval.</p>'\n    : '<p>' + esc(pending.total) + ' waiting' + (pending.shown < pending.total ? ', showing the first ' + esc(pending.shown) : '') + '.</p>';\nconst list = pending.total === 0 ? '' : '<ul>' + entries + '</ul>';\nreturn [{ json: { html: '<h3>Invoices waiting for a decision</h3>' + summary + list } }];\n"
+      }
+    },
+    {
+      "id": "de2e035a-c009-5c7e-b22c-72b8d50e7a3d",
+      "name": "Pending List",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        1200,
+        120
+      ],
+      "webhookId": "09bb3d23-4f0a-530b-a1d6-dacfb0b7ea7f",
+      "parameters": {
+        "operation": "page",
+        "defineForm": "fields",
+        "formFields": {
+          "values": [
+            {
+              "fieldType": "html",
+              "fieldLabel": "list",
+              "html": "={{ $json.html }}"
+            }
+          ]
+        },
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 30,
+        "resumeUnit": "minutes",
+        "options": {
+          "buttonLabel": "Close"
+        }
+      }
+    },
+    {
+      "id": "d8ae7930-16fe-5cd6-9e4e-df505dc4defa",
+      "name": "List Closed",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        1440,
+        120
+      ],
+      "webhookId": "c04284a1-bcc0-5484-a257-1f7a21b11bff",
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "Nothing recorded",
+        "completionMessage": "You can close this page.",
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 10,
+        "resumeUnit": "minutes",
+        "options": {}
+      }
+    },
+    {
+      "id": "22ff546d-003f-5a4e-8b97-806a01a6e302",
+      "name": "Is Decision?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        720,
+        420
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "9a95694f-c6f7-5ccb-a283-e18f91812df8",
+              "leftValue": "={{ $json.kind }}",
+              "rightValue": "decide",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "27cdd3c8-6bef-5e95-a18d-84acdd6c0706",
+      "name": "Get Approval Detail",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        960,
+        360
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT approval_detail($1::bigint) AS detail",
+        "options": {
+          "queryReplacement": "={{ [$json.approval_id] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "hoaCredOpsPg0001",
+          "name": "Ops Postgres"
+        }
+      }
+    },
+    {
+      "id": "2ac95496-b1f8-5257-96b0-e06480bd65ae",
+      "name": "Build Decision Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        360
+      ],
+      "parameters": {
+        "jsCode": "// >>> page-helpers\n// Shared by every approval page. Everything that came from the database or from a person is passed through\n// esc() before it goes into HTML, so a description like \"<script>\" is shown, never run.\nconst esc = (v) =>\n  String(v ?? '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;')\n    .replace(/\"/g, '&quot;')\n    .replace(/'/g, '&#39;');\nconst dollars = (cents) => {\n  if (cents === null || cents === undefined || cents === '') return '';\n  const n = Number(cents);\n  const abs = Math.abs(n);\n  const whole = String(Math.trunc(abs / 100)).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ',');\n  return (n < 0 ? '-' : '') + '$' + whole + '.' + String(abs % 100).padStart(2, '0');\n};\nconst qty = (v) => (v === null || v === undefined ? '' : String(Number(v)));\nconst when = (t) => {\n  const s = String(t ?? '');\n  const m = s.match(/^(\\d{4}-\\d{2}-\\d{2})T(\\d{2}:\\d{2})[^+\\-Z]*([+-]\\d{2}:\\d{2}|Z)?$/);\n  return m ? (m[1] + ' ' + m[2] + ' ' + (m[3] ?? '')).trim() : s;\n};\nconst REASON_TEXT = {\n  price_variance: 'A price on the invoice is more than the allowed tolerance above the purchase order price.',\n  short_delivery: 'More was invoiced than has been received against the purchase order.',\n  duplicate_invoice: 'The same invoice (supplier, number and total) has been received before.',\n  unknown_po: 'The purchase order number on the invoice does not exist.',\n  missing_po: 'The invoice carries no purchase order number.',\n  gst_miscalculated: 'The GST on the invoice does not match the GST rate applied to the taxable amount.',\n  unmatched_line: 'An invoice line could not be matched to a purchase order line.',\n  low_confidence_match: 'An invoice line was matched to a purchase order line with low confidence.',\n  supplier_unknown: 'The supplier is not in the supplier list.',\n  po_supplier_mismatch: 'The purchase order belongs to a different supplier.',\n  line_arithmetic: 'A line total is not quantity times unit price.',\n  totals_arithmetic: 'The line totals do not add up to the invoice subtotal.',\n  quantity_exceeds_po: 'More was invoiced than was ordered.',\n  no_receiving_record: 'Nothing has been received against this purchase order.',\n};\nconst reasonText = (code) => REASON_TEXT[code] ?? code;\nconst VERDICT = { flag: 'FLAGGED', needs_review: 'NEEDS REVIEW', recommend_approve: 'Recommended for approval' };\nconst ISSUE_TEXT = {\n  price_variance: 'price above PO',\n  short_delivery: 'more than received',\n  quantity_exceeds_po: 'more than ordered',\n  unmatched_line: 'no PO line',\n  low_confidence_match: 'low-confidence match',\n  line_arithmetic: 'line total wrong',\n};\nconst FORM_PATH = '/form/6f0a3c1e-7a52-4b6e-9d0f-2f4c1d5a8b01';\n// <<< page-helpers\n// One approval, laid out for a decision: the verdict and why, the invoice, the GST check, and every line\n// next to the purchase order line it was matched to.\nconst req = $('Read Request').first().json;\nconst detail = $input.first().json.detail;\nconst back = ' <a href=\"' + FORM_PATH + '\">Back to the pending approvals</a>.';\nif (!detail) {\n  return [{ json: { state: 'missing', title: 'Not found', message: 'There is no approval number ' + esc(req.approval_id) + '.' + back } }];\n}\nconst a = detail.approval;\nconst inv = detail.invoice;\nif (a.status !== 'pending') {\n  const reason = a.comment ? ' Reason given: ' + esc(a.comment) : '';\n  return [\n    {\n      json: {\n        state: 'decided',\n        title: 'Already ' + esc(a.status),\n        message: 'Invoice ' + esc(inv.invoice_number) + ' was ' + esc(a.status) + ' by ' + esc(a.decided_by) + ' on ' + esc(when(a.decided_at)) + '.' + reason + back,\n      },\n    },\n  ];\n}\n\nconst codes = [...(a.reason_codes ?? []), ...(a.review_reasons ?? [])];\nconst why = codes.length\n  ? '<ul>' + codes.map((c) => '<li><b>' + esc(c) + '</b>: ' + esc(reasonText(c)) + '</li>').join('') + '</ul>'\n  : '<p>Every check passed.</p>';\n\nconst gst = detail.gst;\nconst gstLine = gst\n  ? '<p>GST: stated ' + esc(dollars(gst.stated_cents)) + ', expected ' + esc(dollars(gst.expected_cents)) +\n    ' (tolerance ' + esc(dollars(gst.tolerance_cents)) + ', judged against the ' + (gst.basis === 'po' ? 'purchase order' : 'invoice itself') + ').</p>'\n  : '';\n\nconst lines = (detail.lines ?? [])\n  .map((l) => {\n    const matched = l.po_line_no\n      ? 'PO line ' + esc(l.po_line_no) + ': ' + esc(l.po_description) + ' (ordered ' + esc(qty(l.po_quantity)) + ' at ' + esc(dollars(l.po_unit_price_cents)) +\n        ', received ' + esc(qty(l.received_quantity)) + ', billed before ' + esc(qty(l.billed_before)) + '; matched by ' + esc(l.match_method) + ')'\n      : 'not matched to a PO line';\n    const issues = (l.issues ?? []).map((i) => esc(ISSUE_TEXT[i] ?? i)).join(', ');\n    return (\n      '<tr><td>' + esc(l.line_no) + '</td><td>' + esc(l.description) + '</td><td>' + esc(qty(l.quantity)) + '</td>' +\n      '<td>' + esc(dollars(l.unit_price_cents)) + '</td><td>' + esc(dollars(l.line_total_cents)) + '</td>' +\n      '<td>' + matched + '</td><td>' + (issues || '&mdash;') + '</td></tr>'\n    );\n  })\n  .join('');\n\nconst needsComment = a.recommended_status !== 'recommend_approve';\nconst html =\n  '<h3>' + esc(VERDICT[a.recommended_status] ?? a.recommended_status) + ': invoice ' + esc(inv.invoice_number) + '</h3>' +\n  '<p>You are deciding as <b>' + esc(req.user.email) + '</b>. Your account is recorded as the approver.</p>' +\n  why +\n  '<table>' +\n  '<tr><th>Supplier</th><td>' + esc(inv.supplier_name) + ' (ABN ' + esc(inv.supplier_abn) + ')</td></tr>' +\n  '<tr><th>Invoice date</th><td>' + esc(inv.invoice_date) + (inv.due_date ? ', due ' + esc(inv.due_date) : '') + '</td></tr>' +\n  '<tr><th>Purchase order</th><td>' + esc(inv.po_number ?? 'none on the invoice') + (detail.purchase_order ? ' (found)' : '') + '</td></tr>' +\n  (inv.duplicate_of_invoice_number ? '<tr><th>Duplicate of</th><td>' + esc(inv.duplicate_of_invoice_number) + '</td></tr>' : '') +\n  '<tr><th>Subtotal / GST / Total</th><td>' + esc(dollars(inv.subtotal_cents)) + ' / ' + esc(dollars(inv.gst_cents)) + ' / ' + esc(dollars(inv.total_cents)) + '</td></tr>' +\n  '</table>' +\n  gstLine +\n  '<table><tr><th>#</th><th>Description</th><th>Qty</th><th>Unit price</th><th>Total</th><th>Purchase order line</th><th>Issues</th></tr>' + lines + '</table>' +\n  '<p>' + (needsComment\n    ? 'Give a reason whichever way you decide: this invoice was not a clean recommendation.'\n    : 'A reason is optional for approving, and required for rejecting.') + '</p>';\nreturn [{ json: { state: 'open', needs_comment: needsComment, html } }];\n"
+      }
+    },
+    {
+      "id": "1d70bafc-f31e-5d69-aeab-d67ff9bddb1a",
+      "name": "Approval Open?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1440,
+        360
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "3c65c3da-eef9-5398-8a95-50ab7f18b6d6",
+              "leftValue": "={{ $json.state }}",
+              "rightValue": "open",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "f19bf258-984d-5ede-8d4c-46a09556d0cb",
+      "name": "Reason Required?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1680,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "a5aba974-3389-5814-a691-bbe24837201a",
+              "leftValue": "={{ $json.needs_comment }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "3021087f-8363-53e0-9d89-98c691728fb6",
+      "name": "Decision Page With Reason",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        1920,
+        220
+      ],
+      "webhookId": "f508215d-b2cf-52c9-b5ce-8dcff118e3dc",
+      "parameters": {
+        "operation": "page",
+        "defineForm": "fields",
+        "formFields": {
+          "values": [
+            {
+              "fieldType": "html",
+              "fieldLabel": "summary",
+              "html": "={{ $json.html }}"
+            },
+            {
+              "fieldLabel": "Decision",
+              "fieldType": "dropdown",
+              "requiredField": true,
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Approve"
+                  },
+                  {
+                    "option": "Reject"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Comment",
+              "fieldType": "textarea",
+              "requiredField": true,
+              "placeholder": "Your reason"
+            }
+          ]
+        },
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 30,
+        "resumeUnit": "minutes",
+        "options": {
+          "buttonLabel": "Record decision"
+        }
+      }
+    },
+    {
+      "id": "532cdd99-ffc4-5d5f-ae93-c8022f588e8b",
+      "name": "Decision Page",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        1920,
+        400
+      ],
+      "webhookId": "a026cf89-5c15-53a4-808c-c60902e19fa7",
+      "parameters": {
+        "operation": "page",
+        "defineForm": "fields",
+        "formFields": {
+          "values": [
+            {
+              "fieldType": "html",
+              "fieldLabel": "summary",
+              "html": "={{ $json.html }}"
+            },
+            {
+              "fieldLabel": "Decision",
+              "fieldType": "dropdown",
+              "requiredField": true,
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Approve"
+                  },
+                  {
+                    "option": "Reject"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "Comment",
+              "fieldType": "textarea",
+              "requiredField": false,
+              "placeholder": "Optional when approving, required when rejecting"
+            }
+          ]
+        },
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 30,
+        "resumeUnit": "minutes",
+        "options": {
+          "buttonLabel": "Record decision"
+        }
+      }
+    },
+    {
+      "id": "ebd882d6-bb26-5e6b-92b4-2056f845cea3",
+      "name": "Prepare Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// The decision page's answer, plus who is deciding. No answer means the session timed out: nothing is recorded.\nconst answer = $input.first().json;\nconst req = $('Read Request').first().json;\nconst choice = String(answer.Decision ?? '').trim().toLowerCase();\nconst decision = choice === 'approve' ? 'approved' : choice === 'reject' ? 'rejected' : null;\nif (decision === null) return [{ json: { abandoned: true } }];\nreturn [\n  {\n    json: {\n      abandoned: false,\n      approval_id: req.approval_id,\n      decision,\n      approver: req.user.email,\n      comment: typeof answer.Comment === 'string' ? answer.Comment : '',\n      context: { user_id: String(req.user.id ?? ''), execution_id: $execution.id, workflow_id: $workflow.id, workflow_name: $workflow.name },\n    },\n  },\n];\n"
+      }
+    },
+    {
+      "id": "1b17deac-7790-57c0-8830-3b9a481a1b53",
+      "name": "Decision Given?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2400,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "0cdb60b1-bcc5-571c-87a8-72ed460cd5f3",
+              "leftValue": "={{ $json.abandoned }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "false",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "8becac61-744b-5da5-8d3a-7950a243cfdf",
+      "name": "Record Decision",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
+      "position": [
+        2640,
+        300
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT record_approval_decision($1::bigint, $2, $3, $4, $5::jsonb) AS result",
+        "options": {
+          "queryReplacement": "={{ [$json.approval_id, $json.decision, $json.approver, $json.comment, JSON.stringify($json.context)] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "hoaCredOpsPg0001",
+          "name": "Ops Postgres"
+        }
+      }
+    },
+    {
+      "id": "8d5208b1-5e0a-5f1e-bc67-f49bba905630",
+      "name": "Build Result Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// >>> page-helpers\n// Shared by every approval page. Everything that came from the database or from a person is passed through\n// esc() before it goes into HTML, so a description like \"<script>\" is shown, never run.\nconst esc = (v) =>\n  String(v ?? '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;')\n    .replace(/\"/g, '&quot;')\n    .replace(/'/g, '&#39;');\nconst dollars = (cents) => {\n  if (cents === null || cents === undefined || cents === '') return '';\n  const n = Number(cents);\n  const abs = Math.abs(n);\n  const whole = String(Math.trunc(abs / 100)).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ',');\n  return (n < 0 ? '-' : '') + '$' + whole + '.' + String(abs % 100).padStart(2, '0');\n};\nconst qty = (v) => (v === null || v === undefined ? '' : String(Number(v)));\nconst when = (t) => {\n  const s = String(t ?? '');\n  const m = s.match(/^(\\d{4}-\\d{2}-\\d{2})T(\\d{2}:\\d{2})[^+\\-Z]*([+-]\\d{2}:\\d{2}|Z)?$/);\n  return m ? (m[1] + ' ' + m[2] + ' ' + (m[3] ?? '')).trim() : s;\n};\nconst REASON_TEXT = {\n  price_variance: 'A price on the invoice is more than the allowed tolerance above the purchase order price.',\n  short_delivery: 'More was invoiced than has been received against the purchase order.',\n  duplicate_invoice: 'The same invoice (supplier, number and total) has been received before.',\n  unknown_po: 'The purchase order number on the invoice does not exist.',\n  missing_po: 'The invoice carries no purchase order number.',\n  gst_miscalculated: 'The GST on the invoice does not match the GST rate applied to the taxable amount.',\n  unmatched_line: 'An invoice line could not be matched to a purchase order line.',\n  low_confidence_match: 'An invoice line was matched to a purchase order line with low confidence.',\n  supplier_unknown: 'The supplier is not in the supplier list.',\n  po_supplier_mismatch: 'The purchase order belongs to a different supplier.',\n  line_arithmetic: 'A line total is not quantity times unit price.',\n  totals_arithmetic: 'The line totals do not add up to the invoice subtotal.',\n  quantity_exceeds_po: 'More was invoiced than was ordered.',\n  no_receiving_record: 'Nothing has been received against this purchase order.',\n};\nconst reasonText = (code) => REASON_TEXT[code] ?? code;\nconst VERDICT = { flag: 'FLAGGED', needs_review: 'NEEDS REVIEW', recommend_approve: 'Recommended for approval' };\nconst ISSUE_TEXT = {\n  price_variance: 'price above PO',\n  short_delivery: 'more than received',\n  quantity_exceeds_po: 'more than ordered',\n  unmatched_line: 'no PO line',\n  low_confidence_match: 'low-confidence match',\n  line_arithmetic: 'line total wrong',\n};\nconst FORM_PATH = '/form/6f0a3c1e-7a52-4b6e-9d0f-2f4c1d5a8b01';\n// <<< page-helpers\n// Tell the person what happened. Only a `recorded` result changed anything.\nconst r = $input.first().json.result;\nconst p = $('Prepare Decision').first().json;\nconst back = ' <a href=\"' + FORM_PATH + '\">Back to the pending approvals</a>.';\nlet title;\nlet message;\nswitch (r.result) {\n  case 'recorded':\n    title = 'Recorded: ' + esc(r.decision);\n    message = 'Approval ' + esc(r.approval_id) + ' was ' + esc(r.decision) + ' by ' + esc(r.decided_by) + '.' + back;\n    break;\n  case 'comment_required':\n    title = 'Not recorded: a reason is required';\n    message = 'Nothing was recorded. A reason is required to approve a flagged or doubtful invoice, and to reject any invoice. Open the approval again from the list and give one.' + back;\n    break;\n  case 'already_decided':\n    title = 'Not recorded: already ' + esc(r.decision);\n    message = 'Someone else got there first: it was ' + esc(r.decision) + ' by ' + esc(r.decided_by) + ' on ' + esc(when(r.decided_at)) + '. Your decision was not applied.' + back;\n    break;\n  case 'not_found':\n    title = 'Not recorded: not found';\n    message = 'There is no approval number ' + esc(p.approval_id) + '.' + back;\n    break;\n  default:\n    title = 'Not recorded';\n    message = esc(r.reason ?? 'The decision was not accepted.') + back;\n}\nreturn [{ json: { title, message } }];\n"
+      }
+    },
+    {
+      "id": "814b283c-78f0-560a-8225-3edde9b234e7",
+      "name": "Result Page",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        3120,
+        300
+      ],
+      "webhookId": "59c63275-f80b-5821-903e-1fb5673a9444",
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "={{ $json.title }}",
+        "completionMessage": "={{ $json.message }}",
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 10,
+        "resumeUnit": "minutes",
+        "options": {}
+      }
+    },
+    {
+      "id": "fadb1bc9-bc26-5777-beb3-95b48e185067",
+      "name": "Approval Closed Page",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        1680,
+        520
+      ],
+      "webhookId": "3aaa995a-2011-5f75-8e57-4e926bb9f941",
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "={{ $json.title }}",
+        "completionMessage": "={{ $json.message }}",
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 10,
+        "resumeUnit": "minutes",
+        "options": {}
+      }
+    },
+    {
+      "id": "976741c3-3d9e-5f29-90cd-bc20a5af6f63",
+      "name": "Build Info Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        560
+      ],
+      "parameters": {
+        "jsCode": "// >>> page-helpers\n// Shared by every approval page. Everything that came from the database or from a person is passed through\n// esc() before it goes into HTML, so a description like \"<script>\" is shown, never run.\nconst esc = (v) =>\n  String(v ?? '')\n    .replace(/&/g, '&amp;')\n    .replace(/</g, '&lt;')\n    .replace(/>/g, '&gt;')\n    .replace(/\"/g, '&quot;')\n    .replace(/'/g, '&#39;');\nconst dollars = (cents) => {\n  if (cents === null || cents === undefined || cents === '') return '';\n  const n = Number(cents);\n  const abs = Math.abs(n);\n  const whole = String(Math.trunc(abs / 100)).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ',');\n  return (n < 0 ? '-' : '') + '$' + whole + '.' + String(abs % 100).padStart(2, '0');\n};\nconst qty = (v) => (v === null || v === undefined ? '' : String(Number(v)));\nconst when = (t) => {\n  const s = String(t ?? '');\n  const m = s.match(/^(\\d{4}-\\d{2}-\\d{2})T(\\d{2}:\\d{2})[^+\\-Z]*([+-]\\d{2}:\\d{2}|Z)?$/);\n  return m ? (m[1] + ' ' + m[2] + ' ' + (m[3] ?? '')).trim() : s;\n};\nconst REASON_TEXT = {\n  price_variance: 'A price on the invoice is more than the allowed tolerance above the purchase order price.',\n  short_delivery: 'More was invoiced than has been received against the purchase order.',\n  duplicate_invoice: 'The same invoice (supplier, number and total) has been received before.',\n  unknown_po: 'The purchase order number on the invoice does not exist.',\n  missing_po: 'The invoice carries no purchase order number.',\n  gst_miscalculated: 'The GST on the invoice does not match the GST rate applied to the taxable amount.',\n  unmatched_line: 'An invoice line could not be matched to a purchase order line.',\n  low_confidence_match: 'An invoice line was matched to a purchase order line with low confidence.',\n  supplier_unknown: 'The supplier is not in the supplier list.',\n  po_supplier_mismatch: 'The purchase order belongs to a different supplier.',\n  line_arithmetic: 'A line total is not quantity times unit price.',\n  totals_arithmetic: 'The line totals do not add up to the invoice subtotal.',\n  quantity_exceeds_po: 'More was invoiced than was ordered.',\n  no_receiving_record: 'Nothing has been received against this purchase order.',\n};\nconst reasonText = (code) => REASON_TEXT[code] ?? code;\nconst VERDICT = { flag: 'FLAGGED', needs_review: 'NEEDS REVIEW', recommend_approve: 'Recommended for approval' };\nconst ISSUE_TEXT = {\n  price_variance: 'price above PO',\n  short_delivery: 'more than received',\n  quantity_exceeds_po: 'more than ordered',\n  unmatched_line: 'no PO line',\n  low_confidence_match: 'low-confidence match',\n  line_arithmetic: 'line total wrong',\n};\nconst FORM_PATH = '/form/6f0a3c1e-7a52-4b6e-9d0f-2f4c1d5a8b01';\n// <<< page-helpers\n// A page for requests that cannot be served (no signed-in user, a malformed link).\nconst kind = $('Read Request').first().json.kind;\nconst back = ' <a href=\"' + FORM_PATH + '\">Back to the pending approvals</a>.';\nconst text =\n  kind === 'no_user'\n    ? { title: 'Sign-in required', message: 'This form needs a signed-in n8n account, and none was found.' }\n    : { title: 'Invalid link', message: 'The approval number in this link is not valid.' + back };\nreturn [{ json: text }];\n"
+      }
+    },
+    {
+      "id": "46990857-e0d6-5650-8b3f-33e423e99a95",
+      "name": "Info Page",
+      "type": "n8n-nodes-base.form",
+      "typeVersion": 2.5,
+      "position": [
+        1200,
+        560
+      ],
+      "webhookId": "0f32e901-f826-572e-a8b6-59963d643554",
+      "parameters": {
+        "operation": "completion",
+        "completionTitle": "={{ $json.title }}",
+        "completionMessage": "={{ $json.message }}",
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 10,
+        "resumeUnit": "minutes",
+        "options": {}
+      }
+    }
+  ],
+  "connections": {
+    "Approvals Form": {
+      "main": [
+        [
+          {
+            "node": "Read Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Request": {
+      "main": [
+        [
+          {
+            "node": "Is List?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is List?": {
+      "main": [
+        [
+          {
+            "node": "Get Pending Approvals",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Is Decision?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Pending Approvals": {
+      "main": [
+        [
+          {
+            "node": "Build List Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build List Page": {
+      "main": [
+        [
+          {
+            "node": "Pending List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pending List": {
+      "main": [
+        [
+          {
+            "node": "List Closed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Decision?": {
+      "main": [
+        [
+          {
+            "node": "Get Approval Detail",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Info Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Approval Detail": {
+      "main": [
+        [
+          {
+            "node": "Build Decision Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Decision Page": {
+      "main": [
+        [
+          {
+            "node": "Approval Open?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approval Open?": {
+      "main": [
+        [
+          {
+            "node": "Reason Required?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Approval Closed Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Reason Required?": {
+      "main": [
+        [
+          {
+            "node": "Decision Page With Reason",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Decision Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decision Page With Reason": {
+      "main": [
+        [
+          {
+            "node": "Prepare Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decision Page": {
+      "main": [
+        [
+          {
+            "node": "Prepare Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Decision": {
+      "main": [
+        [
+          {
+            "node": "Decision Given?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decision Given?": {
+      "main": [
+        [
+          {
+            "node": "Record Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record Decision": {
+      "main": [
+        [
+          {
+            "node": "Build Result Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Result Page": {
+      "main": [
+        [
+          {
+            "node": "Result Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Info Page": {
+      "main": [
+        [
+          {
+            "node": "Info Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "hoaErrorHandler01"
+  },
+  "meta": null,
+  "nodeGroups": [],
+  "tags": []
+}

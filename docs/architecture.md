@@ -119,6 +119,7 @@ erDiagram
   reconciliations ||--|{ reconciliation_lines : "per invoice line"
   invoice_lines ||--o| reconciliation_lines : "matched to"
   purchase_order_lines ||--o{ reconciliation_lines : "matched as"
+  invoices ||--o| approvals : "decided by a person"
 
   suppliers {
     text abn UK
@@ -140,6 +141,11 @@ erDiagram
   reconciliation_lines {
     text match_method "sku, description, llm, none"
   }
+  approvals {
+    text status "pending, approved, rejected"
+    text recommended_status "what the person was shown"
+    text decided_by "the signed-in n8n account"
+  }
 ```
 
 | Migration | Contents | Notes |
@@ -151,7 +157,9 @@ erDiagram
 | `005_column_comments` | comments only | says in the schema which extracted columns are unreliable |
 | `006_reconciliation` | `reconciliation_settings`, `reconciliations`, `reconciliation_lines`, `reconciliation_setting()`, `po_key()`, `description_key()`, `deterministic_line_matches()`, `reconcile_candidates()`, `reconcile_invoice()` | the reconciliation rules; see [Reconciliation (P3)](#reconciliation-p3) |
 
-Planned: approvals use `audit_log` (P4), `llm_calls` (P6). Database tests live in `db/tests/*.sql` (plain `ASSERT`s in a rolled-back
+| `007_approvals` | `approvals`, `approval_trim()`, `request_approval()`, `record_approval_decision()`, `pending_approvals()`, `approval_detail()`, `invoice_audit_trail()` | human approval; see [Human approval (P4)](#human-approval-p4) |
+
+Planned: `llm_calls` (P6). Database tests live in `db/tests/*.sql` (plain `ASSERT`s in a rolled-back
 transaction; run with `bash scripts/test-db.sh`).
 
 ### Idempotency and duplicates
@@ -372,6 +380,93 @@ reports are stamped as mock and are never accuracy results.
 
 ---
 
+## Human approval (P4)
+
+Reconciliation ends in a recommendation. Approval is the human step that principle 3 requires: **nothing is
+approved, paid or sent until a person decides**, and `recommend_approve` stays a recommendation. Every
+reconciled invoice, whatever its recommendation, gets exactly one approval.
+
+### The approval
+
+`request_approval(invoice_id)` is the last step of the `Reconcile Invoice` workflow. It creates a `pending`
+`approvals` row holding what the person will be shown (the recommendation, the reason codes, the review
+reasons) and writes `approval.requested` to the audit log. It is idempotent:
+
+| Situation | Result |
+|---|---|
+| no approval yet | `created` |
+| pending, and the reconciliation is unchanged | `unchanged` |
+| pending, and a re-run changed the reconciliation | `refreshed`: the snapshot follows the latest result, audited as `approval.refreshed` with before and after |
+| already decided | `decided`: the decision stands; if the reconciliation now differs from what the person saw, `stale` is true and `approval.stale` is audited |
+| invoice not reconciled | an error result; no row |
+
+If this step fails, the invoice and its reconciliation stay stored and the response says
+`approval: {result: "pending", error: ...}`; running the reconciliation again (`POST /webhook/reconcile`)
+creates the approval.
+
+### The rules (all in SQL, `db/tests/approvals.sql`)
+
+`record_approval_decision(approval_id, decision, approver, comment)`:
+
+| Rule | Enforced by |
+|---|---|
+| one approval per invoice | unique foreign key (no cascade: a decision cannot vanish with its invoice) |
+| a decision is **final**: a decided row cannot be updated or deleted | trigger |
+| approving a `flag` or `needs_review` invoice, or rejecting **any** invoice, needs a written reason; whitespace-only does not count (`approval_trim` also removes tabs, line breaks, non-breaking and zero-width spaces) | the function, and the same rule again as a table constraint that also refuses NULL (a NULL `CHECK` result passes in SQL) |
+| a decision needs an approver and a time | table constraint |
+| a second decision is refused and reported with the first one's details, never applied | the function, under a row lock |
+| the request and the decision are audited in the same transaction | the functions |
+
+The audit row `approval.decided` has the approver as its actor and carries the decision, the reason, what the
+approver was shown (`recommended_status`, reason codes, review reasons), the invoice number, supplier and total.
+`invoice_audit_trail(invoice_id)` returns an invoice's whole history in order: ingested, reconciled, approval
+requested, decided.
+
+### The Approval Form workflow
+
+n8n's own form, signed in with an n8n account (Form Trigger `n8nUserAuth`). The signed-in account's email and id
+are what get recorded as the approver; there is deliberately **no other way to record a decision** (no
+token-authenticated API), so the approver cannot be supplied by a caller. The form is served at
+`/form/6f0a3c1e-7a52-4b6e-9d0f-2f4c1d5a8b01` (the Form Trigger's pinned `webhookId`).
+
+```mermaid
+flowchart TD
+  F["/form/ID?approval_id=N<br/>sign in with an n8n account"] --> R["Read Request"]
+  R -->|no id| P["Get Pending Approvals"] --> LP["Pending List page<br/>flag, then needs_review, then recommended"] --> LC["closed"]
+  R -->|id| D["Get Approval Detail"] --> O{"still pending?"}
+  O -->|no| C["page: already approved or rejected, by whom"]
+  O -->|yes| Q{"flag or needs_review?"}
+  Q -->|yes| DR["Decision page<br/>reason required"]
+  Q -->|no| DP["Decision page<br/>reason optional"]
+  DR --> PD["Prepare Decision<br/>approver = the signed-in user"]
+  DP --> PD
+  PD --> G{"a choice made?"}
+  G -->|no, timed out| X["end: nothing recorded"]
+  G -->|yes| RD["record_approval_decision()"] --> RP["Result page"]
+```
+
+The decision page shows the recommendation and why, the invoice and supplier, the GST check, and every line
+next to the purchase order line it matched (ordered, received, billed before, price, issues). All text from the
+database is HTML-escaped before it is placed in a page, because it originates in a supplier's PDF.
+
+Sessions: a page left open is a waiting n8n execution. Every page has a time limit (30 minutes for the list and
+decision pages, 10 for completion pages) after which the run ends having recorded nothing; the decision is stored
+when the decision page is submitted, never by the page that follows it.
+
+### Failure behaviour
+
+| Failure | Result |
+|---|---|
+| not signed in | n8n redirects to its sign-in; the form is not shown |
+| approval number unknown or malformed | a page saying so; nothing recorded |
+| no reason where one is required | refused with a page saying so; the row stays pending; nothing audited as a decision |
+| someone decided first | refused; the page names who decided and when |
+| decision page abandoned | the run ends at its time limit; the approval stays pending |
+| database error while recording | the execution fails (audited by the Error Handler); nothing is recorded |
+| requesting the approval fails after reconciling | invoice and reconciliation are kept; the response says `pending` with the error; re-run to create it |
+
+---
+
 ## Evaluation
 
 [`evals/`](../evals/README.md) scores extraction against the ground truth `data-gen` writes next
@@ -417,7 +512,7 @@ GitHub Actions on every push and pull request (`.github/workflows/ci.yml`):
 | Workflow JSON checks | valid JSON, no non-empty `pinData`, credential references carry only id and name |
 | Secret scan | gitleaks (pinned image, `.gitleaks.toml` allowlists one public test vector) over full history |
 | ruff + pytest | lint, format, and the data-gen and evals tests on Python 3.12, including the workflow's JS under Node |
-| Stack, ingestion and reconciliation pipeline | stack boots (including building the `pdf-text` image); migrations apply and re-run as a no-op; Postgres `invoice_key_of()` matches Python; `db/tests` pass; seed loads twice identically; credentials, import and publish work and are idempotent; the pipeline behaviour checks pass against the mock model; 100 invoices ingest through the webhook with every duplicate and re-send handled correctly; the reconciliation eval runs in all three modes against the mock and must be perfect; export round-trips byte for byte |
+| Stack, ingestion, reconciliation and approval pipeline | stack boots (including building the `pdf-text` image); migrations apply and re-run as a no-op; Postgres `invoice_key_of()` matches Python; `db/tests` pass; seed loads twice identically; credentials, import and publish work and are idempotent; the pipeline behaviour checks pass against the mock model; 100 invoices ingest through the webhook with every duplicate and re-send handled correctly; the n8n owner account is created and re-created idempotently; the pipeline check signs in to the Approval Form with a scripted client and exercises the request, the rules, the failure paths and the audit trail; the reconciliation eval runs in all three modes against the mock and must be perfect; export round-trips byte for byte |
 
 Evals that call a real model are never run in CI; they are run by hand.
 
@@ -446,6 +541,20 @@ Evals that call a real model are never run in CI; they are run by hand.
   measures it.
 - **Cumulative quantity depends on order.** An invoice reconciled before an earlier one exists would
   not count it; re-running `/reconcile` for the later invoice fixes the result.
+- **Approvers are n8n accounts.** Whoever can sign in to the n8n instance can approve or reject; there are no
+  roles, limits (for example by amount) or separation of duties. Only the **owner** account was tested; whether
+  further users can be added in the self-hosted community edition is unverified.
+- **Approval is not wired to anything.** No payment or export reads `approvals.status` yet.
+- **Nobody is told.** There is no notification; approvers must open the pending list.
+- **Files that fail extraction never reach an approver.** They are recorded as `needs_review` in
+  `invoice_files`, have no invoice and therefore no approval, so they appear on no list.
+- **A decision cannot be undone in the application.** A mistaken approval needs a database change, which the
+  audit log would show.
+- **One address.** n8n builds the form's sign-in redirects from `N8N_WEBHOOK_URL`; reaching it at any other
+  host name (`127.0.0.1` for `localhost`, or a different port) breaks sign-in.
+- **Mostly tested with a scripted client.** One person has also used the form in a real browser and it worked end
+  to end; the scripted client's first-request hang and its need to finish completion pages were not seen there.
+  Only one browser session by one person has been observed.
 - **Token and cost visibility.** Not available through the workflow yet; `ops.llm_calls`
   arrives in P6.
 - **Notifications.** The Error Handler records to `audit_log` only; the notification half

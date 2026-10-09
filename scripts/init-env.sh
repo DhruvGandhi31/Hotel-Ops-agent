@@ -19,6 +19,7 @@ sed \
   -e "s|^OPS_DB_PASSWORD=.*|OPS_DB_PASSWORD=$(secret)|" \
   -e "s|^N8N_ENCRYPTION_KEY=.*|N8N_ENCRYPTION_KEY=$(secret)|" \
   -e "s|^INGEST_WEBHOOK_TOKEN=.*|INGEST_WEBHOOK_TOKEN=$(secret)|" \
+  -e "s|^N8N_OWNER_PASSWORD=.*|N8N_OWNER_PASSWORD=Ho1-$(secret | head -c 32)|" \
   .env.example > .env
 
 echo "init-env: wrote .env with generated secrets"

@@ -292,16 +292,40 @@
       }
     },
     {
-      "id": "be74e19f-c95e-5c8a-961c-e831b181a49b",
-      "name": "Build Reconcile Result",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
+      "id": "00989ce1-7a73-5492-aa22-ef548129fd4f",
+      "name": "Request Approval",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.7,
       "position": [
         2400,
         300
       ],
       "parameters": {
-        "jsCode": "// What the workflow returns: the reconciliation plus what the matcher did.\nconst result = $input.first().json.result;\nconst prepared = ['Prepare Matched', 'Prepare Failed Match', 'Prepare Unneeded']\n  .map((name) => $(name))\n  .find((node) => node.isExecuted);\nreturn [{ json: { ...result, matcher: prepared.first().json.matcher } }];\n"
+        "operation": "executeQuery",
+        "query": "SELECT request_approval($1::bigint, $2::jsonb) AS approval",
+        "options": {
+          "queryReplacement": "={{ [$json.result.invoice_id, JSON.stringify({ execution_id: $execution.id, workflow_id: $workflow.id, workflow_name: $workflow.name })] }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "hoaCredOpsPg0001",
+          "name": "Ops Postgres"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "be74e19f-c95e-5c8a-961c-e831b181a49b",
+      "name": "Build Reconcile Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        300
+      ],
+      "parameters": {
+        "jsCode": "// What the workflow returns: the reconciliation, what the matcher did, and the approval request.\nconst result = $('Reconcile').first().json.result;\nconst prepared = ['Prepare Matched', 'Prepare Failed Match', 'Prepare Unneeded']\n  .map((name) => $(name))\n  .find((node) => node.isExecuted);\n// Requesting the approval is continue-on-fail: a problem there must not hide a reconciliation that is stored.\n// It reports itself as pending, and running the reconciliation again requests the approval again.\nconst out = $input.first().json; // Request Approval\nconst approval = out.error !== undefined ? { result: 'pending', error: String(out.error.message ?? out.error) } : out.approval;\nreturn [{ json: { ...result, matcher: prepared.first().json.matcher, approval } }];\n"
       }
     }
   ],
@@ -471,6 +495,17 @@
       ]
     },
     "Reconcile": {
+      "main": [
+        [
+          {
+            "node": "Request Approval",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request Approval": {
       "main": [
         [
           {

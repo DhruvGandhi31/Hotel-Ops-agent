@@ -21,8 +21,8 @@ measurable system rather than a long list of AI features. Design rules:
 | P0 | Compose stack, migrations, import/export scripts, CI | done, gate confirmed |
 | P1 | Synthetic data: 200 labelled invoices | done, gate confirmed |
 | P2 | Invoice ingestion: webhook, extraction, validation, database | done, gate confirmed |
-| P3 | Reconciliation: deterministic rules, model-assisted line matching | built and tested; **gate run done, awaiting your confirmation** |
-| P4 | Human approval and audit trail | planned |
+| P3 | Reconciliation: deterministic rules, model-assisted line matching | done, gate confirmed |
+| P4 | Human approval and audit trail | built and tested; **demo ready, awaiting your confirmation** |
 | P5 | Ops inbox triage (stretch) | planned |
 | P6 | Observability and write-up | planned |
 
@@ -68,12 +68,37 @@ The synthetic labels and the reconciler share rules, so these numbers show the s
 this data, not that the rules suit a real hotel. Reports and the per-invoice analysis:
 [`evals/results/`](evals/results/README.md), [`docs/p3-engineering-log.md`](docs/p3-engineering-log.md).
 
+### P4: human approval
+
+Every reconciled invoice gets an approval request. A person signs in to n8n, reviews the invoice next to its
+purchase order and the reasons for the recommendation, and approves or rejects it; the decision, **the signed-in
+account as approver** and the time go to the append-only `audit_log`. A decision is final, approving a flagged or
+doubtful invoice (or rejecting any) needs a written reason, and nothing is approved, paid or sent without this
+step. See [how it works](docs/architecture.md#human-approval-p4) and
+[`docs/p4-engineering-log.md`](docs/p4-engineering-log.md) for what went wrong on the way.
+
+```bash
+bash scripts/setup-owner.sh                  # once: the n8n account approvers sign in with (from .env)
+set -a; . ./.env; set +a
+python evals/demo.py                         # invoice -> reconciliation -> approval request -> you decide in the browser
+python evals/demo.py --decide approve --comment "Supplier agreed the price by phone."   # or the script decides
+```
+
+Open `http://localhost:5678/form/6f0a3c1e-7a52-4b6e-9d0f-2f4c1d5a8b01` for the list of pending approvals.
+Use the address in `N8N_WEBHOOK_URL` (in `.env`) every time, for the editor and the form alike: n8n builds its
+sign-in redirects from that setting, and `localhost` and `127.0.0.1` are different hosts to a browser's cookies.
+It was tested with a scripted client and then used in a real browser (sign-in, list, decision, result all worked);
+screenshots and what they led to are in [`docs/p4-engineering-log.md`](docs/p4-engineering-log.md#8-the-first-real-browser-run-by-the-user-2026-10-09).
+The demo picks invoices from `data-gen/out`, so load that dataset's master data first
+(`bash scripts/reset-ops-data.sh && bash scripts/seed.sh`); it stops and says so if the database holds another.
+
 ## Documentation
 
 | Read | For |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | components, data model, the ingestion and reconciliation workflows with their rules and failure semantics, what is built versus planned, known limits |
 | [docs/decisions.md](docs/decisions.md) | every design decision with its reason, newest last |
+| [docs/p4-engineering-log.md](docs/p4-engineering-log.md) | the same for P4, including the form spike, what an open form session leaves behind, and the tests that turned out to be vacuous |
 | [docs/p3-engineering-log.md](docs/p3-engineering-log.md) | the same for P3: every run, bug and mistake, how each failure is handled, and what is unverified |
 | [docs/p2-engineering-log.md](docs/p2-engineering-log.md) | the history behind P2: every model run (including discarded ones), every bug with cause and fix, mistakes made, how each failure is handled, and what is still unverified |
 | [docs/prompts.md](docs/prompts.md) | LLM prompts, mirrored from `prompts/` so changes diff cleanly |
@@ -91,9 +116,11 @@ bash scripts/init-env.sh            # .env with generated secrets (or: cp .env.e
 docker compose up -d --wait         # postgres -> migrations -> pdf-text (built) -> n8n
 bash scripts/setup-credentials.sh   # n8n credentials from .env (never exported to git)
 bash scripts/import.sh              # load and publish the workflows
+bash scripts/setup-owner.sh         # the n8n account approvers sign in with (needed for the Approval Form)
 ```
 
-n8n: http://localhost:5678. Postgres (host): `localhost:5433`, databases `n8n` and `ops`.
+n8n: http://localhost:5678 (sign in with `N8N_OWNER_EMAIL` and `N8N_OWNER_PASSWORD` from `.env`). Postgres (host):
+`localhost:5433`, databases `n8n` and `ops`.
 
 ### Try it
 
@@ -175,7 +202,7 @@ The tests cover the generator and its labels (an independent oracle re-derives e
 the written files, across 30 seeds), the extraction schema, the scorer, the validate-retry
 contract with a fake model, the workflow's own JavaScript run under Node against the Python
 (thousands of generated and mutated outputs, for both the extraction and the line-matching nodes), the
-reconciliation scorer, the mock model, and that `docs/prompts.md` matches
+reconciliation scorer, the approval form's page code (including that hostile text is shown, never run), the mock model, and that `docs/prompts.md` matches
 `prompts/`. CI also boots the stack and exercises the whole ingestion pipeline; see
 [docs/architecture.md](docs/architecture.md#ci).
 
@@ -192,7 +219,7 @@ evals/               eval harness, mock model, pipeline checks, tests, reports
 prompts/             LLM prompts (mirrored in docs/prompts.md)
 schemas/             JSON schemas for LLM outputs
 workflows/           exported n8n workflows, one file per workflow
-scripts/             init-env, setup-credentials, import, export, migrate, seed, test-db,
+scripts/             init-env, setup-credentials, setup-owner, import, export, migrate, seed, test-db,
                      reset-ingestion, reset-ops-data, check_workflows
 docs/                architecture, decisions log, prompts, reports
 ```
