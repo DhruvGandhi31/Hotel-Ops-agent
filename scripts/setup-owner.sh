@@ -17,7 +17,7 @@ set -a; . ./.env; set +a
 
 if [[ -z "${N8N_OWNER_EMAIL:-}" || -z "${N8N_OWNER_PASSWORD:-}" ]]; then
   # n8n wants 8 to 64 characters with a digit and an upper-case letter.
-  password="Ho1-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  password="Ho1-$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')" # ggignore: random, not a credential
   {
     echo ""
     echo "# --- n8n owner account (scripts/setup-owner.sh); the approver identity on the Approval Form ---"
