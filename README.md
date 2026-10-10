@@ -1,18 +1,69 @@
 # hotel-ops-agent
 
-Back-office automation for small and mid-sized hotels, built on self-hosted n8n. The core job is
-to **reconcile supplier invoices against purchase orders and receiving records**, flag
-discrepancies with reason codes, and route everything through human approval. A stretch goal is
-triaging the operations inbox and drafting replies for approval.
+Back-office automation for small and mid-sized hotels, built on self-hosted n8n. It
+**reconciles supplier invoices against purchase orders and receiving records**, flags
+discrepancies with reason codes, and routes every invoice through human approval with a full audit trail.
 
 It is a portfolio project and a customer-discovery demo, so it aims for a correct, explainable,
-measurable system rather than a long list of AI features. Design rules:
+measurable system rather than a long list of AI features. All data is synthetic.
 
-- **Deterministic first, LLM last.** The model reads invoices and breaks ties on fuzzy line
-  matches. All arithmetic, GST checks, PO matching and duplicate detection is plain code or SQL.
+## What it does
+
+```mermaid
+flowchart LR
+  up["Invoice PDF<br/>(upload webhook)"] --> txt["PDF text<br/>(pdf-text service)"]
+  txt --> llm["LLM extraction<br/>qwen3.5:9b, local"]
+  llm --> val{"Schema valid?<br/>(1 retry)"}
+  val -- no --> nr["needs_review"]
+  val -- yes --> db[("Postgres: invoice,<br/>duplicate check")]
+  db --> rec["Reconciliation in SQL<br/>PO, receiving, price, GST"]
+  rec --> status["recommend_approve<br/>flag + reason codes<br/>needs_review"]
+  status --> form["Approval Form<br/>(signed-in n8n user)"]
+  form --> audit[("append-only<br/>audit_log")]
+```
+
+Everything in that picture is an n8n workflow (five of them, exported to `workflows/`) except the
+database rules, which are SQL functions with their own tests. The model is used in exactly two places.
+
+### Results
+
+On fresh synthetic datasets nobody had examined, through the real webhook (not a re-implementation):
+
+| What | Result |
+|---|---|
+| Extraction: total, invoice number, PO number | **100%** each (196/196) |
+| Extraction: line items, strict (description, quantity, unit price, line total) | **99.2%** (892/899) |
+| Reconciliation: `flag` recall, end to end from the PDFs | **100%** (71/71) |
+| Reconciliation: `flag` precision | **98.6%** (71/72) |
+| Truly flagged invoices that were approved | **0** |
+
+Failed and discarded runs are kept on record too (see [P2](#p2-result) for a first run that *missed* a target and why).
+These numbers show the system works as specified on synthetic data, not that the rules suit a real hotel.
+
+### The approval step
+
+| The decision page | The result |
+|---|---|
+| ![The decision page: reasons in words, the invoice lines, a required reason](docs/images/p4-3-decision-page-top.png) | ![The recorded decision, with the approver's account](docs/images/p4-5-result.png) |
+
+A [dashboard snapshot](docs/dashboard.html) (`python evals/dashboard.py`) summarises what the system has done.
+
+### Where I deliberately did not use an LLM
+
+The model reads the invoice text and, only when a line has no SKU match, proposes a match with a
+confidence that must clear 0.85. Everything else is plain code or SQL, because it has to be exact and explainable:
+totals and GST arithmetic, PO matching, quantity against receiving, price tolerance, duplicate detection,
+idempotency keys, approval rules, and the decision to approve (a person). In the gate run, every discrepancy
+between the system and the labels traced to the model's *extraction*, not to the rules, which is the argument for
+keeping the model's job small and validating what it returns.
+
+### Design rules
+
+- **Deterministic first, LLM last.**
 - **Every LLM output is schema-validated**, retried once, then sent to `needs_review`.
 - **No side effects without a human.** Auto-approve is only a recommendation.
 - **Idempotent ingestion**, **workflows as code**, **synthetic data only**.
+- **Infrastructure faults are not verdicts**: a down model server fails the run loudly instead of marking an invoice bad.
 
 ## Status
 
@@ -22,9 +73,9 @@ measurable system rather than a long list of AI features. Design rules:
 | P1 | Synthetic data: 200 labelled invoices | done, gate confirmed |
 | P2 | Invoice ingestion: webhook, extraction, validation, database | done, gate confirmed |
 | P3 | Reconciliation: deterministic rules, model-assisted line matching | done, gate confirmed |
-| P4 | Human approval and audit trail | built and tested; **demo ready, awaiting your confirmation** |
-| P5 | Ops inbox triage (stretch) | planned |
-| P6 | Observability and write-up | planned |
+| P4 | Human approval and audit trail | done, gate confirmed |
+| P5 | Ops inbox triage (stretch) | **not built, by choice**: it needs its own workflow, eval and approval path, and adds nothing to the core claim |
+| P6 | Observability and write-up | trimmed: README, [dashboard](docs/dashboard.html) over the audit and approval tables. **Per-call token and cost logging is not built**: it would mean reworking the extraction workflow, and it is irrelevant for a local model with no per-token price |
 
 ### P2 result
 
@@ -98,6 +149,7 @@ The demo picks invoices from `data-gen/out`, so load that dataset's master data 
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | components, data model, the ingestion and reconciliation workflows with their rules and failure semantics, what is built versus planned, known limits |
 | [docs/decisions.md](docs/decisions.md) | every design decision with its reason, newest last |
+| [docs/p6-engineering-log.md](docs/p6-engineering-log.md) | what P6 delivered and what was dropped on purpose |
 | [docs/p4-engineering-log.md](docs/p4-engineering-log.md) | the same for P4, including the form spike, what an open form session leaves behind, and the tests that turned out to be vacuous |
 | [docs/p3-engineering-log.md](docs/p3-engineering-log.md) | the same for P3: every run, bug and mistake, how each failure is handled, and what is unverified |
 | [docs/p2-engineering-log.md](docs/p2-engineering-log.md) | the history behind P2: every model run (including discarded ones), every bug with cause and fix, mistakes made, how each failure is handled, and what is still unverified |
@@ -215,7 +267,7 @@ db/migrations/       numbered SQL migrations for the ops database
 db/tests/            SQL tests
 data-gen/            synthetic data generator, ground truth, tests
 services/pdf-text/   PDF text extraction service (pypdf), shared by the workflow and the evals
-evals/               eval harness, mock model, pipeline checks, tests, reports
+evals/               eval harness, mock model, pipeline checks, dashboard, tests, reports
 prompts/             LLM prompts (mirrored in docs/prompts.md)
 schemas/             JSON schemas for LLM outputs
 workflows/           exported n8n workflows, one file per workflow

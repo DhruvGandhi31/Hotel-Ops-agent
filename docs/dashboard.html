@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hotel ops agent - dashboard</title>
+<style>
+body{font:15px/1.5 system-ui,sans-serif;margin:0;background:#f6f7f9;color:#1c2330}
+main{max-width:960px;margin:0 auto;padding:24px 16px}
+h1{font-size:22px;margin:0 0 4px} h2{font-size:16px;margin:28px 0 8px}
+.muted{color:#667} .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px}
+.card{background:#fff;border:1px solid #dde;border-radius:8px;padding:12px} .big{font-size:28px;font-weight:600}
+.panel{background:#fff;border:1px solid #dde;border-radius:8px;padding:12px}
+.row{display:flex;align-items:center;gap:8px;margin:4px 0} .label{width:170px;flex:none}
+.bar{height:14px;border-radius:3px;display:inline-block} .n{font-variant-numeric:tabular-nums}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{text-align:left;padding:4px 6px;border-bottom:1px solid #eef}
+</style></head><body><main>
+<h1>Hotel ops agent</h1>
+<div class=muted>Snapshot of the ops database at 2026-10-09 01:07 UTC. 5240 audit rows in total.</div>
+<h2>Totals</h2><div class=cards><div class=card><div class=big>199</div>Invoices ingested</div><div class=card><div class=big>12</div>Duplicates linked</div><div class=card><div class=big>199</div>Reconciled</div><div class=card><div class=big>0</div>Waiting for a person</div><div class=card><div class=big>2</div>Approved by a person</div><div class=card><div class=big>1</div>Rejected by a person</div><div class=card><div class=big>2</div>Flags overridden</div><div class=card><div class=big>21</div>Workflow errors</div></div>
+<h2>What the rules recommended (199 invoices)</h2><div class=panel><div class=row><span class=label>recommend_approve</span><span class=bar style='width:100%;background:#3b82f6'></span><span class=n>125</span></div><div class=row><span class=label>flag</span><span class=bar style='width:57%;background:#3b82f6'></span><span class=n>71</span></div><div class=row><span class=label>needs_review</span><span class=bar style='width:2%;background:#3b82f6'></span><span class=n>3</span></div></div>
+<h2>Why: reason codes and review reasons</h2><div class=panel><div class=row><span class=label>price_variance</span><span class=bar style='width:100%;background:#f59e0b'></span><span class=n>20</span></div><div class=row><span class=label>short_delivery</span><span class=bar style='width:80%;background:#f59e0b'></span><span class=n>16</span></div><div class=row><span class=label>gst_miscalculated</span><span class=bar style='width:65%;background:#f59e0b'></span><span class=n>13</span></div><div class=row><span class=label>duplicate_invoice</span><span class=bar style='width:60%;background:#f59e0b'></span><span class=n>12</span></div><div class=row><span class=label>unknown_po</span><span class=bar style='width:40%;background:#f59e0b'></span><span class=n>8</span></div><div class=row><span class=label>missing_po</span><span class=bar style='width:30%;background:#f59e0b'></span><span class=n>6</span></div><div class=row><span class=label>supplier_unknown</span><span class=bar style='width:15%;background:#f59e0b'></span><span class=n>3</span></div><div class=row><span class=label>unmatched_line</span><span class=bar style='width:15%;background:#f59e0b'></span><span class=n>3</span></div></div>
+<h2>What people decided</h2><div class=panel><div class=row><span class=label>approved</span><span class=bar style='width:100%;background:#10b981'></span><span class=n>2</span></div><div class=row><span class=label>rejected</span><span class=bar style='width:50%;background:#10b981'></span><span class=n>1</span></div></div>
+<p class=muted>Workflow errors are failures the Error Handler recorded. Many come from the outage tests,
+which stop the model server on purpose; the audit log also survives data resets, so counts can span several runs.</p>
+<h2>Latest audit events</h2><div class=panel><table>
+<tr><th>Time (UTC)</th><th>Actor</th><th>Action</th><th>Entity</th></tr><tr><td>2026-10-08 19:19:20</td><td>owner@example.com</td><td>approval.decided</td><td>invoice 390</td></tr><tr><td>2026-10-08 19:16:12</td><td>Reconcile Invoice</td><td>approval.requested</td><td>invoice 390</td></tr><tr><td>2026-10-08 19:16:12</td><td>Reconcile Invoice</td><td>invoice.reconciled</td><td>invoice 390</td></tr><tr><td>2026-10-08 19:16:07</td><td>Ingest Invoice</td><td>invoice.ingested</td><td>invoice 390</td></tr><tr><td>2026-10-08 19:14:28</td><td>owner@example.com</td><td>approval.decided</td><td>invoice 389</td></tr><tr><td>2026-10-08 19:14:04</td><td>owner@example.com</td><td>approval.decided</td><td>invoice 388</td></tr><tr><td>2026-10-08 19:07:13</td><td>Reconcile Invoice</td><td>approval.requested</td><td>invoice 389</td></tr><tr><td>2026-10-08 19:07:13</td><td>Reconcile Invoice</td><td>invoice.reconciled</td><td>invoice 389</td></tr><tr><td>2026-10-08 19:07:10</td><td>Ingest Invoice</td><td>invoice.ingested</td><td>invoice 389</td></tr><tr><td>2026-10-08 19:05:30</td><td>Reconcile Invoice</td><td>approval.requested</td><td>invoice 388</td></tr><tr><td>2026-10-08 19:05:30</td><td>Reconcile Invoice</td><td>invoice.reconciled</td><td>invoice 388</td></tr><tr><td>2026-10-08 19:05:28</td><td>Ingest Invoice</td><td>invoice.ingested</td><td>invoice 388</td></tr>
+</table></div>
+</main></body></html>

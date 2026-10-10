@@ -10,7 +10,7 @@ def env(monkeypatch):
     for key, value in {
         "INGEST_WEBHOOK_TOKEN": "t",
         "N8N_OWNER_EMAIL": "o@example.com",
-        "N8N_OWNER_PASSWORD": "Pw1-x",
+        "N8N_OWNER_PASSWORD": "Pw1-x",  # ggignore: a fake value for a test
     }.items():
         monkeypatch.setenv(key, value)
 
