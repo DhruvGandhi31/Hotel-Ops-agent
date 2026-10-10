@@ -1,7 +1,7 @@
 # P6 engineering log
 
 Write-up and observability, trimmed. Same rules as the earlier logs ([p4](p4-engineering-log.md)): what was done,
-what went wrong, what is unverified. Decision: [decisions.md](decisions.md), 2026-10-09.
+what went wrong, what is unverified. Decision taken 2026-10-09.
 
 ## 1. Scope
 

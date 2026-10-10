@@ -27,7 +27,7 @@ What it shows:
   schema mode handled. So n8n's chat model node is enough here, but a weaker model would need
   schema-constrained decoding (an HTTP Request node to Ollama).
 - Dev results were discarded and regenerated once after a bug was found in how the schema was
-  embedded in the prompt (see `docs/decisions.md`); the table above is the corrected run.
+  embedded in the prompt (see `docs/p2-engineering-log.md`, B3); the table above is the corrected run.
 
 The per-model reports in this directory have the full field tables and failures. Raw per-invoice
 output is in `raw/` (gitignored).
@@ -45,4 +45,4 @@ workflow** (`run.py --target n8n`, same model and prompt) shows what the text ex
 
 Header fields were 100% in all three. n8n's extractor space-joins every cell of a table row, so the
 model cannot tell where a description ends or which trailing number is the line total and which the
-GST. That finding is why `Extract From File` was replaced; see `docs/decisions.md`.
+GST. That finding is why `Extract From File` was replaced; see `docs/p2-engineering-log.md`.

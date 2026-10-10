@@ -4,7 +4,7 @@ Human-in-the-loop: every reconciled invoice gets an approval request, a person a
 and the decision, approver and timestamp land in `audit_log`. Same rules as the earlier logs
 ([p2](p2-engineering-log.md), [p3](p3-engineering-log.md)): this page records the history as it happens
 (every spike and run, bug and fix, mistake and its corrective decision, what is unverified), while
-[decisions.md](decisions.md) records the decisions and [architecture.md](architecture.md) the design.
+[architecture.md](architecture.md) records the design.
 
 Contents: [1 Timeline](#1-timeline) · [2 The form spike](#2-the-form-spike) ·
 [3 Bugs and fixes](#3-bugs-and-fixes) · [4 Mistakes during the session](#4-mistakes-during-the-session) ·

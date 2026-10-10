@@ -1,6 +1,6 @@
 """Did ingestion do the right thing with each file, separately from whether the extraction was right?
 
-Expected behaviour comes from the ground-truth labels (and is the rule in docs/decisions.md):
+Expected behaviour comes from the ground-truth labels (the rule is in docs/architecture.md, "Idempotency"):
   original   first time this invoice is seen: stored, duplicate_of is empty
   duplicate  same supplier + invoice number + total, different file: stored, duplicate_of = the original
   noop       byte-identical file already seen: nothing changes, the original's invoice is returned

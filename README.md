@@ -25,6 +25,10 @@ flowchart LR
 Everything in that picture is an n8n workflow (five of them, exported to `workflows/`) except the
 database rules, which are SQL functions with their own tests. The model is used in exactly two places.
 
+### Demo
+
+**[Watch the demo (MP4, 12 MB)](docs/demo.mp4)**: a flagged invoice from upload to a recorded approval, with its audit trail. To run it yourself, see [the P4 section](#p4-human-approval).
+
 ### Results
 
 On fresh synthetic datasets nobody had examined, through the real webhook (not a re-implementation):
@@ -46,7 +50,13 @@ These numbers show the system works as specified on synthetic data, not that the
 |---|---|
 | ![The decision page: reasons in words, the invoice lines, a required reason](docs/images/p4-3-decision-page-top.png) | ![The recorded decision, with the approver's account](docs/images/p4-5-result.png) |
 
-A [dashboard snapshot](docs/dashboard.html) (`python evals/dashboard.py`) summarises what the system has done.
+### Dashboard
+
+`python evals/dashboard.py` writes [a static page](docs/dashboard.html) of counts over the audit, reconciliation and approval tables. It is a snapshot, regenerated on demand, not a live view. This one was taken after the P3 gate run (199 invoices) and three recorded decisions; the workflow-error count includes failures the outage tests provoke on purpose.
+
+| Totals and recommendations | Decisions and the latest audit events |
+|---|---|
+| ![Dashboard: 199 invoices, 71 flagged, reason codes](docs/images/dashboard-1-totals.png) | ![Dashboard: approvals and the latest audit events](docs/images/dashboard-2-decisions-audit.png) |
 
 ### Where I deliberately did not use an LLM
 
@@ -148,7 +158,6 @@ The demo picks invoices from `data-gen/out`, so load that dataset's master data 
 | Read | For |
 |---|---|
 | [docs/architecture.md](docs/architecture.md) | components, data model, the ingestion and reconciliation workflows with their rules and failure semantics, what is built versus planned, known limits |
-| [docs/decisions.md](docs/decisions.md) | every design decision with its reason, newest last |
 | [docs/p6-engineering-log.md](docs/p6-engineering-log.md) | what P6 delivered and what was dropped on purpose |
 | [docs/p4-engineering-log.md](docs/p4-engineering-log.md) | the same for P4, including the form spike, what an open form session leaves behind, and the tests that turned out to be vacuous |
 | [docs/p3-engineering-log.md](docs/p3-engineering-log.md) | the same for P3: every run, bug and mistake, how each failure is handled, and what is unverified |

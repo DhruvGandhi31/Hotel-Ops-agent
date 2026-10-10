@@ -1,6 +1,6 @@
 """The reconciliation eval: invoices through the system, scored against the ground-truth labels.
 
-Modes (see docs/decisions.md for why there are several):
+Modes (see docs/architecture.md, 'Evaluating reconciliation', for why there are several):
   --source truth --matcher oracle   rules only: ground-truth extraction, ground-truth line matches,
                                     SQL only. Proves the rules are implemented as specified.
   --source truth --matcher n8n      ground-truth extraction, the real model matching the lines that

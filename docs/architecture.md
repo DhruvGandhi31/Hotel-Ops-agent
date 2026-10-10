@@ -1,8 +1,8 @@
 # Architecture
 
-How the system fits together, what is built today, and what is planned. Decisions and their
-reasons are in [decisions.md](decisions.md), the bug and run history in
-[p2-engineering-log.md](p2-engineering-log.md); this page is the map.
+How the system fits together, what is built today, and what is planned. The bug and run
+history, with the reasons behind each decision, is in the engineering logs
+([p2](p2-engineering-log.md), [p3](p3-engineering-log.md), [p4](p4-engineering-log.md)); this page is the map.
 
 **Status legend:** built and tested = ✅ · in progress = 🔧 · planned = ⏳
 

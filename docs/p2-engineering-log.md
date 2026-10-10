@@ -2,8 +2,8 @@
 
 A complete, honest account of building P2 (invoice ingestion): every model run including the ones
 that were thrown away, every bug and its cause and fix, the mistakes made along the way, and how
-failures are handled. [decisions.md](decisions.md) holds the *decisions*; this page holds the
-*history* behind them. Written at the end of P2; nothing here is reconstructed from memory alone, and
+failures are handled. The author's decisions log is kept locally and not published; this page holds the
+*history* behind the decisions. Written at the end of P2; nothing here is reconstructed from memory alone, and
 where a cause was not verified it says so (section 6).
 
 Contents: [1 Timeline](#1-timeline) · [2 Every model run](#2-every-model-run) ·
@@ -253,7 +253,7 @@ mirror tests fail on drift; the ingestion judge is unit-tested for every wrong o
 | Gate reports (run 1 and run 2) | `evals/results/` | yes |
 | Dev reports and the text-source comparison | `evals/results/dev/` | yes |
 | Raw per-invoice outputs | `evals/results/raw/`, `evals/results/dev/raw/` | no (gitignored) |
-| Decisions and their reasons | [decisions.md](decisions.md) | yes |
+| Decisions and their reasons | a local working log, not published | no |
 | Prompts, with a drift test | [prompts.md](prompts.md) | yes |
 | Data distribution (seeds 42 and 43) | [synthetic-data-report.md](synthetic-data-report.md), [synthetic-data-report-seed43.md](synthetic-data-report-seed43.md) | yes |
 | System design | [architecture.md](architecture.md) | yes |

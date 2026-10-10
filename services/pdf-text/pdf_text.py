@@ -4,7 +4,7 @@ Why this exists instead of n8n's `Extract From File` node: that node space-joins
 table row (`Batteries AA 24pk 8 PACK 21.90 175.20 17.52`), so the model cannot tell where a
 description ends or which number is the line total and which is the GST. pypdf emits one cell
 per line, which the same model reads at 100% on the dev set versus 91% with n8n's text (see
-docs/decisions.md). Same code on both sides means the eval measures what runs.
+docs/p2-engineering-log.md). Same code on both sides means the eval measures what runs.
 """
 
 import io

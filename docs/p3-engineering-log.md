@@ -3,8 +3,7 @@
 Reconciliation: decide `recommend_approve`, `flag` (with reason codes) or `needs_review` for each
 ingested invoice. Same rules as [p2-engineering-log.md](p2-engineering-log.md): this page records the
 history (every run, bug and fix, mistake and its corrective decision, what is unverified) as it
-happens, while [decisions.md](decisions.md) records the decisions and
-[architecture.md](architecture.md) the design.
+happens, while [architecture.md](architecture.md) records the design.
 
 Contents: [1 Timeline](#1-timeline) · [2 Every run](#2-every-run) ·
 [3 Bugs and fixes](#3-bugs-and-fixes) · [4 Mistakes during the session](#4-mistakes-during-the-session) ·
